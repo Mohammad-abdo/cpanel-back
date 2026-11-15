@@ -1,0 +1,11 @@
+# DECISIONS
+
+User requested all documentation inside docs; PLAN/REVIEW/TEST/DONE are nested accordingly. Source stack is a requirement, not verified compatibility. Decisions pending: server inventory, MUI 9 availability/compatibility, exact versions, DNS/email/offsite providers, retention, budget, RPO/RTO, SLOs, MFA recovery and emergency approvals. Source relationship diagram contains export CSS artifacts and needs reconstruction.
+
+TASK-001 blocking Owner inputs (see docs/discovery): production host aliases/roles; authorization for read-only remote inventory (or filled SERVER-INVENTORY rows); RPO/RTO and related recovery fields in RECOVERY-OBJECTIVES.md.
+
+2026-11-15 Owner authorization: user instructed to continue through all roadmap phases while production inventory/security baseline remain UNKNOWN and RPO/RTO remain REQUIRES DECISION. Proceeding in phase order with honest UNKNOWN markers; this does not invent production facts or authorize production deploy/firewall/secret/restore actions.
+
+2026-11-15 Owner decision (changes required.md rules): (1) Servers may be added by SSH host, port, username and password; the password is stored encrypted (AES-256-GCM, key CREDENTIAL_ENCRYPTION_KEY) and reused for connections. The Owner was told a panel breach would expose stored server passwords and chose this over a one-time password with a stored key. (2) The Owner may use a file manager and a live web terminal on servers. This replaces "No direct dashboard root access" and "no arbitrary shell" for the Owner only; every session and file change is audited. Other roles are unchanged. (3) The New project form offers database creation (approval flow unchanged). (4) Order: phase 10 (TASK-033..036) before phase 09.
+
+2026-11-15 Owner decision (second request): (1) Projects keep any environment variables per environment, including secret values, stored AES-256-GCM encrypted and revealed only on request to users allowed to configure that environment. This replaces "secret values are never accepted, only reference names". (2) Any kind of project (more types and process managers). (3) A server details page with full control: SSH-based service actions and system information for the Owner. (4) cPanel-style home page. Then continue phase 09.
