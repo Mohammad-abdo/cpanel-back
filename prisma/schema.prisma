@@ -1,0 +1,1088 @@
+// DESIGN-ALIGNED schema for TASK-002 — not applied migrations; no live MySQL claimed.
+// Source: required.md §10 + docs/04-DATABASE-SCHEMA.md
+// IDs: String @id @default(uuid())
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity ───────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  displayName  String
+  passwordHash String?
+  status       String    @default("active")
+  locale       String    @default("en")
+  timezone     String    @default("UTC")
+  ownerFlag    Boolean   @default(false)
+  disabledAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions              Session[]
+  mfaFactors            MfaFactor[]
+  apiTokens             ApiToken[]
+  userRoles             UserRole[]
+  resourceGrants        ResourceGrant[]           @relation("GrantSubject")
+  grantsCreated         ResourceGrant[]           @relation("GrantCreator")
+  teamMembers           TeamMember[]
+  projectMembers        ProjectMember[]
+  activityEvents        ActivityEvent[]           @relation("ActivityActor")
+  auditEvents           AuditEvent[]              @relation("AuditActor")
+  initiatedOps          OperationJob[]            @relation("OpInitiator")
+  approvedOps           OperationJob[]            @relation("OpApprover")
+  approvalRequestsMade  ApprovalRequest[]         @relation("ApprovalRequester")
+  approvalRequestsDone  ApprovalRequest[]         @relation("ApprovalApprover")
+  deploymentsInitiated  Deployment[]              @relation("DeploymentInitiator")
+  deploymentApprovals   DeploymentApproval[]
+  deploymentSteps       DeploymentStep[]
+  incidentAssignments   IncidentAssignment[]
+  notifications         Notification[]
+  notificationChannels  NotificationChannel[]
+  notificationPrefs     NotificationPreference[]
+  logBookmarks          LogBookmark[]
+  reportRuns            ReportRun[]
+  accessReviewsAsReviewer AccessReview[]          @relation("AccessReviewer")
+  accessReviewsAsSubject  AccessReview[]          @relation("AccessSubject")
+  restoreApprovals      RestoreRun[]
+
+  @@index([status])
+}
+
+model Session {
+  id             String    @id @default(uuid())
+  userId         String
+  tokenHash      String    @unique
+  expiresAt      DateTime
+  ipHash         String?
+  userAgentHash  String?
+  mfaSatisfied   Boolean   @default(false)
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model MfaFactor {
+  id         String    @id @default(uuid())
+  userId     String
+  type       String
+  secretRef  String?
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+}
+
+model ApiToken {
+  id        String    @id @default(uuid())
+  userId    String?
+  name      String
+  hash      String    @unique
+  scopesJson Json?
+  expiresAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+}
+
+// ─── Authorization ──────────────────────────────────────────
+
+model Role {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  systemProtected Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+}
+
+model Permission {
+  id           String   @id @default(uuid())
+  code         String   @unique
+  resourceType String
+  riskTier     String
+  createdAt    DateTime @default(now())
+
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  id           String @id @default(uuid())
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+}
+
+model UserRole {
+  id        String @id @default(uuid())
+  userId    String
+  roleId    String
+  // MySQL unique indexes treat NULL specially; use empty string for global scope.
+  scopeType String @default("")
+  scopeId   String @default("")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, roleId, scopeType, scopeId])
+  @@index([userId])
+}
+
+model ResourceGrant {
+  id             String    @id @default(uuid())
+  userId         String
+  permissionCode String
+  resourceType   String
+  resourceId     String
+  environmentId  String?
+  conditionsJson Json?
+  grantedById    String?
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  user      User  @relation("GrantSubject", fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy User? @relation("GrantCreator", fields: [grantedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, resourceType, resourceId])
+  @@index([environmentId])
+}
+
+// ─── Teams ──────────────────────────────────────────────────
+
+model Team {
+  id         String    @id @default(uuid())
+  name       String
+  slug       String    @unique
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  members TeamMember[]
+  projectLinks ProjectTeam[]
+}
+
+model TeamMember {
+  id        String   @id @default(uuid())
+  teamId    String
+  userId    String
+  teamRole  String
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+}
+
+model ProjectMember {
+  id          String   @id @default(uuid())
+  projectId   String
+  userId      String
+  projectRole String
+  createdAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+}
+
+model ProjectTeam {
+  id          String   @id @default(uuid())
+  projectId   String
+  teamId      String
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  team    Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, teamId])
+  @@index([teamId])
+}
+
+// ─── Infrastructure ─────────────────────────────────────────
+
+model Server {
+  id          String    @id @default(uuid())
+  alias       String    @unique
+  hostname    String?
+  status      String    @default("unknown")
+  agentBoundAt DateTime?
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  agent      ServerAgent?
+  services   ServerService[]
+  ports      ServerPort[]
+  snapshots  ServerSnapshot[]
+  projects   Project[]
+  domains    Domain[]
+  dbInstances DatabaseInstance[]
+  healthChecks HealthCheck[]
+  logSources LogSource[]
+  securityEvents SecurityEvent[]
+  activityEvents ActivityEvent[] @relation("ActivityServer")
+
+  @@index([status])
+}
+
+model ServerAgent {
+  id              String    @id @default(uuid())
+  serverId        String    @unique
+  agentPublicId   String    @unique
+  certFingerprint String
+  capabilitiesJson Json?
+  lastSeenAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  server     Server               @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  executions OperationExecution[]
+}
+
+model ServerService {
+  id        String   @id @default(uuid())
+  serverId  String
+  name      String
+  manager   String
+  state     String?
+  metaJson  Json?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, name])
+}
+
+model ServerPort {
+  id          String   @id @default(uuid())
+  serverId    String
+  port        Int
+  proto       String
+  processHint String?
+  createdAt   DateTime @default(now())
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, port, proto])
+}
+
+model ServerSnapshot {
+  id          String   @id @default(uuid())
+  serverId    String
+  capturedAt  DateTime
+  summaryJson Json?
+  createdAt   DateTime @default(now())
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, capturedAt])
+}
+
+// ─── Projects ───────────────────────────────────────────────
+
+model Project {
+  id         String    @id @default(uuid())
+  serverId   String
+  name       String
+  slug       String
+  type       String
+  status     String    @default("active")
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  server       Server               @relation(fields: [serverId], references: [id], onDelete: Restrict)
+  environments ProjectEnvironment[]
+  runtime      ProjectRuntime?
+  repository   ProjectRepository?
+  members      ProjectMember[]
+  teamLinks    ProjectTeam[]
+  deployments  Deployment[]
+  domains      Domain[]
+  managedDbs   ManagedDatabase[]
+  backupPolicies BackupPolicy[]
+  healthChecks HealthCheck[]
+  logSources   LogSource[]
+  errorGroups  ErrorGroup[]
+  activityEvents ActivityEvent[]    @relation("ActivityProject")
+
+  @@unique([serverId, slug])
+  @@index([status])
+}
+
+model ProjectEnvironment {
+  id          String   @id @default(uuid())
+  projectId   String
+  code        String
+  displayName String
+  createdAt   DateTime @default(now())
+
+  project      Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deployments  Deployment[]
+  managedDbs   ManagedDatabase[]
+  activityEvents ActivityEvent[] @relation("ActivityEnvironment")
+  operationJobs OperationJob[]
+
+  @@unique([projectId, code])
+}
+
+model ProjectRuntime {
+  id             String   @id @default(uuid())
+  projectId      String   @unique
+  runtime        String?
+  processManager String?
+  metaJson       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model ProjectRepository {
+  id             String   @id @default(uuid())
+  projectId      String   @unique
+  remoteUrl      String?
+  defaultBranch  String?
+  lastCommitSha  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+// ─── Deployments ────────────────────────────────────────────
+
+model Deployment {
+  id             String   @id @default(uuid())
+  projectId      String
+  environmentId  String
+  status         String
+  commitSha      String?
+  initiatedById  String?
+  correlationId  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project     Project              @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  environment ProjectEnvironment   @relation(fields: [environmentId], references: [id], onDelete: Restrict)
+  initiatedBy User?                @relation("DeploymentInitiator", fields: [initiatedById], references: [id], onDelete: SetNull)
+  steps       DeploymentStep[]
+  approvals   DeploymentApproval[]
+
+  @@index([projectId, createdAt])
+  @@index([correlationId])
+  rollbackOfId String?
+}
+
+model DeploymentStep {
+  id           String    @id @default(uuid())
+  deploymentId String
+  name         String
+  status       String
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  actorId      String?
+  detailJson   Json?
+  createdAt    DateTime  @default(now())
+
+  deployment Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  actor      User?      @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([deploymentId, name])
+}
+
+model DeploymentApproval {
+  id           String   @id @default(uuid())
+  deploymentId String
+  approverId   String?
+  decision     String
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  deployment Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  approver   User?      @relation(fields: [approverId], references: [id], onDelete: SetNull)
+
+  @@index([deploymentId])
+}
+
+// ─── Operations ─────────────────────────────────────────────
+
+model OperationJob {
+  id              String    @id @default(uuid())
+  operationId     String    @unique
+  correlationId   String
+  idempotencyKey  String    @unique
+  action          String
+  resourceType    String
+  resourceId      String
+  environmentId   String?
+  riskTier        String
+  status          String
+  initiatorId     String?
+  approverId      String?
+  expiresAt       DateTime?
+  payloadJson     Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  initiator   User?               @relation("OpInitiator", fields: [initiatorId], references: [id], onDelete: SetNull)
+  approver    User?               @relation("OpApprover", fields: [approverId], references: [id], onDelete: SetNull)
+  environment ProjectEnvironment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
+  executions  OperationExecution[]
+  approvals   ApprovalRequest[]
+  activityEvents ActivityEvent[]  @relation("ActivityOperation")
+
+  @@index([status, createdAt])
+  @@index([correlationId])
+}
+
+model OperationExecution {
+  id             String    @id @default(uuid())
+  operationJobId String
+  attemptId      String
+  agentId        String?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  result         String?
+  detailJson     Json?
+  createdAt      DateTime  @default(now())
+
+  operationJob OperationJob @relation(fields: [operationJobId], references: [id], onDelete: Cascade)
+  agent        ServerAgent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@unique([operationJobId, attemptId])
+}
+
+model ApprovalRequest {
+  id              String    @id @default(uuid())
+  resourceType    String
+  resourceId      String
+  operationJobId  String?
+  requesterId     String?
+  approverId      String?
+  status          String
+  reason          String?
+  impactJson      Json?
+  rollbackPlan    String?
+  decidedAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  operationJob OperationJob? @relation(fields: [operationJobId], references: [id], onDelete: SetNull)
+  requester    User?         @relation("ApprovalRequester", fields: [requesterId], references: [id], onDelete: SetNull)
+  approver     User?         @relation("ApprovalApprover", fields: [approverId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  action String?
+  riskTier String?
+  bindingHash String?
+  expiresAt DateTime?
+}
+
+// ─── Hosting ────────────────────────────────────────────────
+
+model Domain {
+  id         String    @id @default(uuid())
+  name       String    @unique
+  projectId  String?
+  serverId   String?
+  status     String    @default("active")
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  project       Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  server        Server?          @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  dnsRecords    DnsRecord[]
+  certificates  SslCertificate[]
+  environmentId String?
+}
+
+model DnsRecord {
+  id           String   @id @default(uuid())
+  domainId     String
+  type         String
+  name         String
+  valueSummary String
+  ttl          Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([domainId, type])
+  providerRef String?
+}
+
+model SslCertificate {
+  id        String    @id @default(uuid())
+  domainId  String
+  provider  String?
+  expiresAt DateTime?
+  status    String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([domainId])
+  challenge String?
+  lastError String?
+}
+
+model DatabaseInstance {
+  id        String   @id @default(uuid())
+  serverId  String?
+  engine    String
+  name      String
+  status    String   @default("unknown")
+  host      String?
+  port      Int?
+  /// Reference to a secret manager entry only; never a secret value.
+  adminSecretRef String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  server    Server?            @relation(fields: [serverId], references: [id], onDelete: SetNull)
+  managed   ManagedDatabase[]
+
+  @@index([engine, status])
+}
+
+model ManagedDatabase {
+  id            String   @id @default(uuid())
+  projectId     String
+  instanceId    String
+  dbName        String
+  environmentId String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project     Project            @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  instance    DatabaseInstance   @relation(fields: [instanceId], references: [id], onDelete: Restrict)
+  environment ProjectEnvironment @relation(fields: [environmentId], references: [id], onDelete: Restrict)
+  users       DatabaseUser[]
+
+  @@unique([projectId, environmentId, dbName])
+}
+
+model DatabaseUser {
+  id                String   @id @default(uuid())
+  managedDatabaseId String
+  username          String
+  privilegesJson    Json?
+  createdAt         DateTime @default(now())
+
+  managedDatabase ManagedDatabase @relation(fields: [managedDatabaseId], references: [id], onDelete: Cascade)
+
+  @@unique([managedDatabaseId, username])
+}
+
+// ─── Backups ────────────────────────────────────────────────
+
+model BackupPolicy {
+  id                  String   @id @default(uuid())
+  projectId           String
+  environmentId       String?
+  frequency           String?
+  retentionDays       Int?
+  encryption          String?
+  destinationCategory String?
+  rpoMinutes          Int?
+  rtoMinutes          Int?
+  archivedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  runs    BackupRun[]
+
+  @@index([projectId])
+  kindsJson Json?
+}
+
+model BackupRun {
+  id                 String    @id @default(uuid())
+  policyId           String
+  status             String
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  verificationStatus String?
+  createdAt          DateTime  @default(now())
+
+  policy    BackupPolicy     @relation(fields: [policyId], references: [id], onDelete: Restrict)
+  artifacts BackupArtifact[]
+
+  @@index([policyId, startedAt])
+  trigger String?
+}
+
+model BackupArtifact {
+  id          String   @id @default(uuid())
+  backupRunId String
+  kind        String
+  locationRef String
+  checksum    String?
+  sizeBytes   BigInt?
+  createdAt   DateTime @default(now())
+
+  backupRun BackupRun    @relation(fields: [backupRunId], references: [id], onDelete: Restrict)
+  restores  RestoreRun[]
+
+  @@index([backupRunId])
+}
+
+model RestoreRun {
+  id             String   @id @default(uuid())
+  artifactId     String
+  status         String
+  isolatedTrial  Boolean  @default(true)
+  approvedById   String?
+  correlationId  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  artifact   BackupArtifact @relation(fields: [artifactId], references: [id], onDelete: Restrict)
+  approvedBy User?          @relation(fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@index([artifactId, createdAt])
+  approvalRequestId String?
+  safetyBackupRunId String?
+  mode String?
+  previewJson Json?
+}
+
+// ─── Monitoring ─────────────────────────────────────────────
+
+model MetricRule {
+  id            String   @id @default(uuid())
+  scopeType     String
+  scopeId       String
+  metric        String
+  thresholdJson Json?
+  severity      String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  alerts Alert[]
+
+  @@index([scopeType, scopeId])
+}
+
+model HealthCheck {
+  id          String   @id @default(uuid())
+  projectId   String?
+  serverId    String?
+  kind        String
+  intervalSec Int      @default(60)
+  status      String   @default("unknown")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  server  Server?  @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([serverId])
+}
+
+model Alert {
+  id          String   @id @default(uuid())
+  ruleId      String?
+  severity    String
+  status      String
+  fingerprint String   @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rule   MetricRule?  @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  events AlertEvent[]
+
+  @@index([status, severity])
+  projectId String?
+  acknowledgedById String?
+}
+
+model AlertEvent {
+  id         String   @id @default(uuid())
+  alertId    String
+  fromStatus String?
+  toStatus   String
+  at         DateTime @default(now())
+
+  alert Alert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@index([alertId, at])
+  actorId String?
+  note String?
+}
+
+// ─── Logs metadata ──────────────────────────────────────────
+
+model LogSource {
+  id        String   @id @default(uuid())
+  projectId String?
+  serverId  String?
+  kind      String
+  labelJson Json?
+  createdAt DateTime @default(now())
+
+  project Project?    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  server  Server?     @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  streams LogStream[]
+
+  @@index([projectId])
+  @@index([serverId])
+}
+
+model LogStream {
+  id          String   @id @default(uuid())
+  logSourceId String
+  externalRef String
+  createdAt   DateTime @default(now())
+
+  logSource LogSource @relation(fields: [logSourceId], references: [id], onDelete: Cascade)
+
+  @@index([logSourceId])
+}
+
+model LogBookmark {
+  id        String   @id @default(uuid())
+  userId    String
+  projectId String?
+  name      String
+  queryJson Json?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ErrorGroup {
+  id          String   @id @default(uuid())
+  projectId   String
+  fingerprint String
+  firstSeenAt DateTime
+  lastSeenAt  DateTime
+  count       Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, fingerprint])
+}
+
+// ─── Security ───────────────────────────────────────────────
+
+model SecurityEvent {
+  id         String   @id @default(uuid())
+  serverId   String?
+  severity   String
+  category   String
+  occurredAt DateTime
+  source     String?
+  payloadJson Json?
+  createdAt  DateTime @default(now())
+
+  server Server? @relation(fields: [serverId], references: [id], onDelete: SetNull)
+
+  @@index([serverId, occurredAt])
+  @@index([category, occurredAt])
+}
+
+model SecurityIncident {
+  id         String    @id @default(uuid())
+  status     String
+  severity   String
+  title      String
+  detectedAt DateTime
+  closedAt   DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  assignments IncidentAssignment[]
+
+  @@index([status, severity])
+  projectId String?
+}
+
+model IncidentAssignment {
+  id         String   @id @default(uuid())
+  incidentId String
+  userId     String
+  assignedAt DateTime @default(now())
+
+  incident SecurityIncident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
+}
+
+// ─── Reports ────────────────────────────────────────────────
+
+model ReportDefinition {
+  id              String   @id @default(uuid())
+  code            String   @unique
+  name            String
+  paramsSchemaJson Json?
+  kind            String?
+  projectId       String?
+  paramsJson      Json?
+  createdAt       DateTime @default(now())
+
+  runs      ReportRun[]
+  schedules ReportSchedule[]
+}
+
+model ReportRun {
+  id            String    @id @default(uuid())
+  definitionId  String
+  requestedById String?
+  status        String
+  periodStart   DateTime?
+  periodEnd     DateTime?
+  createdAt     DateTime  @default(now())
+
+  definition  ReportDefinition  @relation(fields: [definitionId], references: [id], onDelete: Restrict)
+  requestedBy User?             @relation(fields: [requestedById], references: [id], onDelete: SetNull)
+  artifacts   ReportArtifact[]
+
+  @@index([definitionId, createdAt])
+  scheduleId String?
+  idempotencyKey String?
+}
+
+model ReportSchedule {
+  id             String   @id @default(uuid())
+  definitionId   String
+  cron           String
+  recipientsJson Json?
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  definition ReportDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+
+  @@index([definitionId])
+  paramsJson Json?
+  createdById String?
+  lastRunAt DateTime?
+}
+
+model ReportArtifact {
+  id          String   @id @default(uuid())
+  reportRunId String
+  format      String
+  locationRef String
+  createdAt   DateTime @default(now())
+
+  reportRun ReportRun @relation(fields: [reportRunId], references: [id], onDelete: Restrict)
+
+  @@index([reportRunId])
+  expiresAt DateTime?
+  sizeBytes Int?
+}
+
+// ─── Audit & Activity ───────────────────────────────────────
+
+model ActivityEvent {
+  id             String   @id @default(uuid())
+  actorId        String?
+  serverId       String?
+  projectId      String?
+  environmentId  String?
+  operationJobId String?
+  category       String
+  action         String
+  resourceType   String
+  resourceId     String?
+  result         String
+  source         String
+  correlationId  String?
+  metadata       Json?
+  occurredAt     DateTime
+  createdAt      DateTime @default(now())
+
+  actor        User?               @relation("ActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+  server       Server?             @relation("ActivityServer", fields: [serverId], references: [id], onDelete: SetNull)
+  project      Project?            @relation("ActivityProject", fields: [projectId], references: [id], onDelete: SetNull)
+  environment  ProjectEnvironment? @relation("ActivityEnvironment", fields: [environmentId], references: [id], onDelete: SetNull)
+  operationJob OperationJob?       @relation("ActivityOperation", fields: [operationJobId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, occurredAt])
+  @@index([projectId, occurredAt])
+  @@index([serverId, occurredAt])
+  @@index([category, action, occurredAt])
+  @@index([correlationId])
+}
+
+model AuditEvent {
+  id                 String   @id @default(uuid())
+  actorId            String?
+  actorType          String
+  action             String
+  resourceType       String
+  resourceId         String?
+  environmentId      String?
+  operationJobId     String?
+  approvalRequestId  String?
+  initiatorId        String?
+  approverId         String?
+  executorId         String?
+  result             String
+  ipHash             String?
+  userAgentHash      String?
+  correlationId      String
+  beforeJson         Json?
+  afterJson          Json?
+  occurredAt         DateTime
+  createdAt          DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([occurredAt])
+  @@index([actorId, occurredAt])
+  @@index([resourceType, resourceId, occurredAt])
+  @@index([correlationId])
+}
+
+model AccessReview {
+  id            String    @id @default(uuid())
+  reviewerId    String?
+  subjectUserId String?
+  periodStart   DateTime
+  periodEnd     DateTime
+  status        String
+  findingsJson  Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  reviewer User? @relation("AccessReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  subject  User? @relation("AccessSubject", fields: [subjectUserId], references: [id], onDelete: SetNull)
+}
+
+// ─── Notifications ──────────────────────────────────────────
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  kind      String
+  title     String
+  body      String?
+  readAt    DateTime?
+  linkJson  Json?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model NotificationChannel {
+  id        String   @id @default(uuid())
+  userId    String?
+  type      String
+  configRef String?
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([type])
+}
+
+model NotificationPreference {
+  id          String   @id @default(uuid())
+  userId      String
+  eventKind   String
+  channelType String
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventKind, channelType])
+}
+
+// ─── Agent enrollment (TASK-008) ────────────────────────────
+
+model AgentEnrollment {
+  id          String    @id @default(uuid())
+  serverId    String
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdById String?
+  createdAt   DateTime  @default(now())
+
+  @@index([serverId])
+}
+
+// External identities (SSH/GitHub) mapped to platform users; unmapped stay Unattributed (TASK-014).
+model ExternalIdentity {
+  id         String   @id @default(uuid())
+  provider   String
+  externalId String
+  userId     String?
+  status     String   @default("unmapped")
+  createdAt  DateTime @default(now())
+
+  @@unique([provider, externalId])
+}
+
+// ─── Durable log storage (additive) ─────────────────────────
+model LogEntry {
+  id           String   @id @default(uuid())
+  seq          Int      @unique @default(autoincrement())
+  projectId    String
+  serverId     String?
+  environmentId String?
+  source       String
+  kind         String?
+  severity     String
+  message      String   @db.Text
+  requestId    String?
+  traceId      String?
+  deploymentId String?
+  stack        String?  @db.Text
+  fieldsJson   Json?
+  occurredAt   DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([projectId, occurredAt])
+  @@index([severity, occurredAt])
+  @@index([requestId])
+}
