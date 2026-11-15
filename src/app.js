@@ -10,6 +10,9 @@ export function jsonReplacer(_key, value) {
   return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value.toString();
 }
 
+/** Server file editor and upload accept bodies up to 1 MB / 20 MB (see server-access.routes.js). */
+const LARGE_BODY_ROUTE = /^\/api\/v1\/servers\/[^/]+\/files\/(content|upload)$/;
+
 export function createApp() {
   const app = express();
   app.set('json replacer', jsonReplacer);
@@ -20,7 +23,9 @@ export function createApp() {
     res.set('X-Request-Id', req.requestId);
     next();
   });
-  app.use(express.json({ limit: '64kb' }));
+  // 64 KB JSON everywhere except the two file routes, which parse their own larger bodies.
+  const json = express.json({ limit: '64kb' });
+  app.use((req, res, next) => (LARGE_BODY_ROUTE.test(req.path) ? next() : json(req, res, next)));
   app.use('/api/v1', apiRouter);
   app.use(notFound);
   app.use(errorHandler);
