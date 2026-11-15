@@ -78,7 +78,7 @@ describe('job config', () => {
     expect(parseJobConfig({ NT_JOBS_ENABLED: 'false' }).enabled).toBe(false);
   });
 
-  it('builds jobs that call the service methods; security.sync is opt-in', async () => {
+  it('builds jobs that call the service methods; security.sync runs as the system actor by default', async () => {
     const services = {
       operations: { expireStale: vi.fn().mockResolvedValue(1) },
       alerts: { evaluateAll: vi.fn().mockResolvedValue([]), escalateDue: vi.fn().mockResolvedValue([]) },
@@ -87,11 +87,15 @@ describe('job config', () => {
       backups: { runDue: vi.fn().mockResolvedValue([]), verifyLatest: vi.fn().mockResolvedValue([]), planRetention: vi.fn().mockResolvedValue({ remove: [1], keep: [] }) },
       prisma: { backupPolicy: { findMany: vi.fn().mockResolvedValue([{ id: 'p1' }]) } },
       security: { sync: vi.fn().mockResolvedValue({}) },
+      accessReviews: { startDue: vi.fn().mockResolvedValue({ started: false }) },
     };
     const jobs = buildJobs(services, parseJobConfig({}));
-    expect(jobs.map((j) => j.name)).not.toContain('security.sync');
+    expect(jobs.map((j) => j.name)).toEqual(expect.arrayContaining(['security.sync', 'accessReviews.startDue']));
     for (const j of jobs) await j.run({ at: new Date() });
     expect(services.operations.expireStale).toHaveBeenCalled();
+    expect(services.security.sync).toHaveBeenCalledWith({ sinceMinutes: 60 }, expect.objectContaining({ system: true }));
+    expect(services.accessReviews.startDue).toHaveBeenCalledWith(expect.any(Date), { everyDays: 90 });
+    expect(buildJobs(services, parseJobConfig({ NT_ACCESS_REVIEW_DAYS: '0' })).map((j) => j.name)).not.toContain('accessReviews.startDue');
     expect(services.backups.planRetention).toHaveBeenCalledWith('p1', expect.objectContaining({ isOwner: true, system: true }));
     const withSec = buildJobs(services, parseJobConfig({ NT_SECURITY_SYNC_ACTOR_ID: 'u1' }));
     await withSec.find((j) => j.name === 'security.sync').run({});

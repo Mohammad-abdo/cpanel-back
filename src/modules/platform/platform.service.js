@@ -1,4 +1,5 @@
 import { AppError } from '../../common/errors/app-error.js';
+import { isSystemActor } from '../../common/system-actor.js';
 import { redact } from '../audit/audit.service.js';
 import { ACTION_RISK, PERM, requiresApproval } from './platform.risk.js';
 
@@ -6,6 +7,8 @@ export const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Shared permission check. Exact scope: environment-scoped keys never pass without an environment. */
 export async function assertCan(rbac, actor, check) {
+  // Scheduled jobs act as the frozen SYSTEM_ACTOR (identity check: it cannot come from an HTTP session).
+  if (isSystemActor(actor)) return;
   if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
   if (!rbac?.can) throw new AppError(500, 'RBAC_UNAVAILABLE', 'Authorization service unavailable');
   if (!(await rbac.can(actor, check))) {

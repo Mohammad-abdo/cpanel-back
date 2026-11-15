@@ -1,6 +1,7 @@
 import { AppError } from '../../common/errors/app-error.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
+import { notify } from '../notifications/notifications.service.js';
 
 const HIGH_RISK = new Set(['ssl.issue', 'server.firewall.update', 'project.backup.restore', 'project.secret.rotate', 'project.database.manage', 'team.permission.assign']);
 const PLATFORM = { resourceType: 'platform', resourceId: 'platform', environmentId: null };
@@ -27,6 +28,31 @@ export function createAccessReviewsService({ prisma, now = () => new Date(), aud
     if (r.reviewerId !== actor.id && !actor.isOwner) throw new AppError(403, 'NOT_REVIEWER', 'Only the assigned reviewer can act on this review');
   };
 
+  async function createReview(input, reviewerId, auditActorId) {
+    const start = new Date(input.periodStart);
+    const end = new Date(input.periodEnd);
+    if (!(end > start)) throw new AppError(422, 'PERIOD_INVALID', 'Review period end must be after start');
+    const grants = await prisma.resourceGrant.findMany({ where: { revokedAt: null, ...(input.subjectUserId ? { userId: input.subjectUserId } : {}) }, include: { user: true } });
+    const items = grants
+      // The reviewer's own grants are listed for transparency but cannot be decided by them.
+      .map((g) => ({
+        grantId: g.id,
+        userId: g.userId,
+        permissionCode: g.permissionCode,
+        resourceType: g.resourceType,
+        resourceId: g.resourceId,
+        environmentId: g.environmentId ?? null,
+        findings: classifyGrant(g, g.user, now()),
+        ownGrant: g.userId === reviewerId,
+        decision: null,
+      }));
+    const row = await prisma.accessReview.create({
+      data: { reviewerId, subjectUserId: input.subjectUserId ?? null, periodStart: start, periodEnd: end, status: 'open', findingsJson: { items, generatedAt: now().toISOString() } },
+    });
+    await audit({ actorId: auditActorId, action: 'access_review.start', resourceId: row.id, result: 'success', after: { grants: items.length, flagged: items.filter((i) => i.findings.length).length } });
+    return row;
+  }
+
   return {
     async list({ status, limit }, actor) {
       await assertCan(rbac, actor, { permissionKey: PERM.ACCESS_REVIEW, ...PLATFORM });
@@ -42,29 +68,24 @@ export function createAccessReviewsService({ prisma, now = () => new Date(), aud
     async start(input, actor) {
       await assertCan(rbac, actor, { permissionKey: PERM.ACCESS_REVIEW, ...PLATFORM });
       if (input.subjectUserId && input.subjectUserId === actor.id) throw new AppError(403, 'SELF_REVIEW_DENIED', 'You cannot review your own access');
-      const start = new Date(input.periodStart);
-      const end = new Date(input.periodEnd);
-      if (!(end > start)) throw new AppError(422, 'PERIOD_INVALID', 'Review period end must be after start');
-      const grants = await prisma.resourceGrant.findMany({ where: { revokedAt: null, ...(input.subjectUserId ? { userId: input.subjectUserId } : {}) }, include: { user: true } });
-      const items = grants
-        // The reviewer's own grants are listed for transparency but cannot be decided by them.
-        .map((g) => ({
-          grantId: g.id,
-          userId: g.userId,
-          permissionCode: g.permissionCode,
-          resourceType: g.resourceType,
-          resourceId: g.resourceId,
-          environmentId: g.environmentId ?? null,
-          findings: classifyGrant(g, g.user, now()),
-          ownGrant: g.userId === actor.id,
-          decision: null,
-        }));
-      const row = await prisma.accessReview.create({
-        data: { reviewerId: actor.id, subjectUserId: input.subjectUserId ?? null, periodStart: start, periodEnd: end, status: 'open', findingsJson: { items, generatedAt: now().toISOString() } },
-      });
-      await audit({ actorId: actor.id, action: 'access_review.start', resourceId: row.id, result: 'success', after: { grants: items.length, flagged: items.filter((i) => i.findings.length).length } });
-      return row;
+      return createReview(input, actor.id, actor.id);
     },
+
+    /**
+     * Scheduled review: when the newest review is older than `everyDays`, open one covering that
+     * period, assign it to an active Owner and notify them. Nothing is decided automatically.
+     */
+    async startDue(at = now(), { everyDays = 90 } = {}) {
+      const every = everyDays * 86400000;
+      const last = await prisma.accessReview.findFirst({ orderBy: { createdAt: 'desc' } });
+      if (last && at.getTime() - new Date(last.createdAt).getTime() < every) return { started: false, reason: 'not_due' };
+      const owner = await prisma.user.findFirst({ where: { ownerFlag: true, status: 'active', disabledAt: null }, orderBy: { createdAt: 'asc' } });
+      if (!owner) return { started: false, reason: 'no_active_owner' };
+      const row = await createReview({ periodStart: new Date(at.getTime() - every).toISOString(), periodEnd: at.toISOString() }, owner.id, null);
+      await notify({ userId: owner.id, type: 'access_review.scheduled', title: 'Scheduled access review is ready', resourceType: 'access_review', resourceId: row.id }, { prisma });
+      return { started: true, reviewId: row.id };
+    },
+
 
     async decide(id, { decisions }, actor) {
       const review = await load(id);

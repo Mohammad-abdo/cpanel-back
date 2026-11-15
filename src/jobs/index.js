@@ -8,6 +8,7 @@ import { createCertificatesService } from '../modules/certificates/certificates.
 import { createBackupsService } from '../modules/backups/backups.service.js';
 import { createSecurityService } from '../modules/security/security.service.js';
 import { createIncidentsService } from '../modules/incidents/incidents.service.js';
+import { createAccessReviewsService } from '../modules/access-reviews/access-reviews.service.js';
 import { getDeps } from '../modules/platform/platform.wiring.js';
 import { logsService } from '../modules/logs/logs.routes.js';
 import { createScheduler } from './scheduler.js';
@@ -24,6 +25,7 @@ export function createDefaultServices() {
     certificates: createCertificatesService(deps),
     backups: createBackupsService(deps),
     security: createSecurityService({ ...deps, incidents: createIncidentsService(deps) }),
+    accessReviews: createAccessReviewsService(deps),
     auditService,
   };
 }

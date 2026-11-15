@@ -13,7 +13,8 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:seed": "node --env-file-if-exists=.env prisma/seed.js",
     "seed:demo": "node --env-file-if-exists=.env scripts/seed-demo.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "drill:security": "node scripts/drill-security.mjs"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

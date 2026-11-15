@@ -17,6 +17,7 @@ const DEFAULTS = {
   'certificates.scanExpiry': { env: 'NT_JOB_CERT_SCAN_MS', ms: 6 * HOUR },
   'backups.planRetention': { env: 'NT_JOB_RETENTION_MS', ms: 24 * HOUR },
   'security.sync': { env: 'NT_JOB_SECURITY_SYNC_MS', ms: 15 * MIN },
+  'accessReviews.startDue': { env: 'NT_JOB_ACCESS_REVIEW_MS', ms: 24 * HOUR },
 };
 
 /** Minimum accepted interval: values below it (or non-numeric) fall back to the default. */
@@ -34,11 +35,13 @@ export function parseJobConfig(env = process.env) {
     enabled: String(env.NT_JOBS_ENABLED ?? 'true').toLowerCase() !== 'false',
     intervals,
     securitySyncActorId: env.NT_SECURITY_SYNC_ACTOR_ID || null,
+    // Review cadence is an Owner policy decision (docs/DECISIONS.md); quarterly by default, 0 disables.
+    accessReviewEveryDays: Number.isFinite(Number(env.NT_ACCESS_REVIEW_DAYS)) && env.NT_ACCESS_REVIEW_DAYS !== '' && env.NT_ACCESS_REVIEW_DAYS !== undefined ? Number(env.NT_ACCESS_REVIEW_DAYS) : 90,
   };
 }
 
 export function buildJobs(services, config) {
-  const { operations, alerts, reports, certificates, backups, prisma, security } = services;
+  const { operations, alerts, reports, certificates, backups, prisma, security, accessReviews } = services;
   const every = (name) => config.intervals[name];
   const jobs = [
     { name: 'operations.expireStale', intervalMs: every('operations.expireStale'), run: () => operations.expireStale() },
@@ -59,12 +62,16 @@ export function buildJobs(services, config) {
       },
     },
   ];
-  // Security sync acts on behalf of a named Owner account, so it only runs when one is configured.
-  if (config.securitySyncActorId && security) {
+  // Security sync runs as the system actor unless a named Owner account is configured for attribution.
+  if (security) {
+    const actor = config.securitySyncActorId ? { id: config.securitySyncActorId, isOwner: true } : SYSTEM_ACTOR;
+    jobs.push({ name: 'security.sync', intervalMs: every('security.sync'), run: () => security.sync({ sinceMinutes: 60 }, actor) });
+  }
+  if (accessReviews && config.accessReviewEveryDays > 0) {
     jobs.push({
-      name: 'security.sync',
-      intervalMs: every('security.sync'),
-      run: () => security.sync({ sinceMinutes: 60 }, { id: config.securitySyncActorId, isOwner: true }),
+      name: 'accessReviews.startDue',
+      intervalMs: every('accessReviews.startDue'),
+      run: ({ at } = {}) => accessReviews.startDue(at ?? new Date(), { everyDays: config.accessReviewEveryDays }),
     });
   }
   return jobs;

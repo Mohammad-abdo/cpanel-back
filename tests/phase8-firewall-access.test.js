@@ -152,3 +152,51 @@ describe('access reviews', () => {
     await expect(t.svc.start({ periodStart: period.periodEnd, periodEnd: period.periodStart }, DEV)).rejects.toMatchObject({ code: 'PERIOD_INVALID' });
   });
 });
+
+describe('scheduled access reviews', () => {
+  const AT = new Date('2026-06-01T00:00:00Z');
+  const OWNER_ROW = { id: U(1), ownerFlag: true, status: 'active', disabledAt: null };
+  function sched({ last = null, owner = OWNER_ROW } = {}) {
+    const created = [];
+    const prisma = {
+      resourceGrant: { findMany: vi.fn(async () => [{ id: U(600), userId: U(7), permissionCode: 'domain.create', resourceType: 'project', resourceId: U(10), grantedById: U(1), expiresAt: null, user: { status: 'active' } }]) },
+      accessReview: {
+        findFirst: vi.fn(async () => last),
+        create: vi.fn(async ({ data }) => { const r = { id: U(401), ...data }; created.push(r); return r; }),
+      },
+      user: { findFirst: vi.fn(async () => owner) },
+      notification: { create: vi.fn(async ({ data }) => data) },
+    };
+    const auditService = { record: vi.fn() };
+    return { prisma, created, auditService, svc: createAccessReviewsService({ prisma, rbac: makeRbac([]), auditService, now: () => AT }) };
+  }
+
+  it('opens a review assigned to the Owner when none exists, and notifies them', async () => {
+    const t = sched();
+    expect(await t.svc.startDue(AT, { everyDays: 90 })).toMatchObject({ started: true });
+    expect(t.created[0]).toMatchObject({ reviewerId: OWNER_ROW.id, status: 'open', periodEnd: AT });
+    expect(t.created[0].findingsJson.items).toHaveLength(1);
+    expect(t.prisma.notification.create).toHaveBeenCalledWith({ data: expect.objectContaining({ userId: OWNER_ROW.id, kind: 'access_review.scheduled' }) });
+    expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ actorId: null, action: 'access_review.start' }));
+  });
+  it('is not due while the newest review is inside the cadence', async () => {
+    const t = sched({ last: { createdAt: new Date(AT.getTime() - 30 * 86400000) } });
+    expect(await t.svc.startDue(AT, { everyDays: 90 })).toEqual({ started: false, reason: 'not_due' });
+    expect(t.created).toHaveLength(0);
+  });
+  it('does nothing without an active Owner', async () => {
+    const t = sched({ owner: null });
+    expect(await t.svc.startDue(AT, { everyDays: 90 })).toEqual({ started: false, reason: 'no_active_owner' });
+  });
+});
+
+describe('system actor', () => {
+  it('passes assertCan only as the exact frozen object', async () => {
+    const { assertCan } = await import('../src/modules/platform/platform.service.js');
+    const { SYSTEM_ACTOR } = await import('../src/common/system-actor.js');
+    const rbac = { can: vi.fn(async () => false) };
+    await expect(assertCan(rbac, SYSTEM_ACTOR, { permissionKey: 'security.incident.manage' })).resolves.toBeUndefined();
+    await expect(assertCan(rbac, { ...SYSTEM_ACTOR }, { permissionKey: 'security.incident.manage' })).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+    expect(Object.isFrozen(SYSTEM_ACTOR)).toBe(true);
+  });
+});
