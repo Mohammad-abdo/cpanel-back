@@ -99,8 +99,12 @@ describe('security: IDOR and privilege escalation', () => {
     const rbac = { can: vi.fn(async (a) => a.isOwner || a.id === APPROVER.id) };
     const platform = createPlatformService({ prisma, rbac, auditService: { record: vi.fn() } });
     const req = await platform.request({ action: 'dns.change', resourceType: 'domain', resourceId: UUID, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, DEV);
-    await expect(platform.decide(req.id, { decision: 'approve' }, DEV)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
+    // Without the decide permission the answer is a plain 403 before anything about the request is revealed.
+    await expect(platform.decide(req.id, { decision: 'approve' }, DEV)).rejects.toMatchObject({ status: 403, code: 'FORBIDDEN' });
     await expect(platform.decide(req.id, { decision: 'approve' }, { id: U(55), isOwner: false })).rejects.toMatchObject({ status: 403 });
+    // With the permission, approving your own request is still refused.
+    const own = await platform.request({ action: 'dns.change', resourceType: 'domain', resourceId: UUID, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, APPROVER);
+    await expect(platform.decide(own.id, { decision: 'approve' }, APPROVER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
     await platform.decide(req.id, { decision: 'approve' }, APPROVER);
     await expect(platform.decide(req.id, { decision: 'reject' }, APPROVER)).rejects.toMatchObject({ code: 'APPROVAL_NOT_PENDING' });
   });
