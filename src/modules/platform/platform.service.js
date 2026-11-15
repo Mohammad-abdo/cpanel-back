@@ -80,8 +80,11 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
 
     async decide(id, { decision, note }, actor) {
       if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+      // Permission first: someone without approval rights must not learn whether a request exists or its state.
+      await assertCan(rbac, actor, { permissionKey: PERM.APPROVAL_DECIDE, resourceType: 'platform', resourceId: 'platform', environmentId: null });
       const row = await prisma.approvalRequest.findUnique({ where: { id } });
-      if (!row) throw new AppError(404, 'APPROVAL_NOT_FOUND', 'Approval request not found');
+      // Operation (deployment) approvals share this table but are decided through /operations/:id/approve.
+      if (!row || row.operationJobId) throw new AppError(404, 'APPROVAL_NOT_FOUND', 'Approval request not found');
       if (row.status !== 'pending') throw new AppError(409, 'APPROVAL_NOT_PENDING', 'Approval request is not pending');
       if (now().getTime() - new Date(row.createdAt).getTime() > APPROVAL_TTL_MS) {
         throw new AppError(409, 'APPROVAL_EXPIRED', 'Approval request has expired');
@@ -89,7 +92,6 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
       if (!allowSelfApproval && row.requesterId === actor.id) {
         throw new AppError(403, 'SELF_APPROVAL_DENIED', 'Requester cannot approve their own request');
       }
-      await assertCan(rbac, actor, { permissionKey: PERM.APPROVAL_DECIDE, resourceType: 'platform', resourceId: 'platform', environmentId: null });
       const updated = await prisma.approvalRequest.update({
         where: { id },
         data: { status: decision === 'approve' ? 'approved' : 'rejected', approverId: actor.id, decidedAt: now() },
@@ -100,7 +102,9 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
 
     async list({ status, limit }, actor) {
       await assertCan(rbac, actor, { permissionKey: PERM.APPROVAL_DECIDE, resourceType: "platform", resourceId: "platform", environmentId: null });
-      return prisma.approvalRequest.findMany({ where: status ? { status } : {}, take: limit, orderBy: { createdAt: 'desc' } });
+      // Platform approvals only: operation approvals (operationJobId set, status PENDING/APPROVED in upper case)
+      // live in the same table, and MySQL's case-insensitive collation would otherwise match them too.
+      return prisma.approvalRequest.findMany({ where: { operationJobId: null, ...(status ? { status } : {}) }, take: limit, orderBy: { createdAt: 'desc' } });
     },
   };
 }

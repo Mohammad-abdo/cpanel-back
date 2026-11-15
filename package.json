@@ -15,7 +15,10 @@
     "seed:demo": "node --env-file-if-exists=.env scripts/seed-demo.mjs",
     "smoke": "node scripts/smoke.mjs",
     "drill:security": "node scripts/drill-security.mjs",
-    "dev:ssh": "node scripts/dev-ssh-server.mjs"
+    "dev:ssh": "node scripts/dev-ssh-server.mjs",
+    "test:security": "node scripts/security-tests.mjs",
+    "drill:recovery": "node --env-file-if-exists=.env scripts/recovery-drill.mjs",
+    "test:load": "node scripts/load-test.mjs"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

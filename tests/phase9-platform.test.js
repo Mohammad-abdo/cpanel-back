@@ -189,3 +189,26 @@ describe('platform routes fail closed without a session', () => {
     }
   });
 });
+
+describe('platform approval decisions (security test findings)', () => {
+  it('checks permission before revealing whether a request exists or its state', async () => {
+    const { createPlatformService } = await import('../src/modules/platform/platform.service.js');
+    const { makeApprovalPrisma, makeRbac, DEV } = await import('./phase6-helpers.js');
+    const prisma = makeApprovalPrisma();
+    const platform = createPlatformService({ prisma, rbac: makeRbac([]), auditService: { record: vi.fn() } });
+    const consumed = await prisma.approvalRequest.create({ data: { status: 'consumed', requesterId: 'x', resourceType: 'domain', resourceId: 'd' } });
+    for (const id of [consumed.id, '00000000-0000-4000-8000-000000000000']) {
+      await expect(platform.decide(id, { decision: 'approve' }, DEV)).rejects.toMatchObject({ status: 403 });
+    }
+  });
+  it('lists and decides platform approvals only, never operation approvals', async () => {
+    const { createPlatformService } = await import('../src/modules/platform/platform.service.js');
+    const { makeApprovalPrisma, makeRbac, OWNER } = await import('./phase6-helpers.js');
+    const prisma = makeApprovalPrisma();
+    const platform = createPlatformService({ prisma, rbac: makeRbac([]), auditService: { record: vi.fn() } });
+    const op = await prisma.approvalRequest.create({ data: { status: 'pending', operationJobId: 'job-1', requesterId: 'x', resourceType: 'project', resourceId: 'p' } });
+    await platform.list({ status: 'pending', limit: 10 }, OWNER);
+    expect(prisma.approvalRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { operationJobId: null, status: 'pending' } }));
+    await expect(platform.decide(op.id, { decision: 'approve' }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_NOT_FOUND' });
+  });
+});
