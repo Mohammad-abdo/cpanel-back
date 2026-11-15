@@ -44,6 +44,20 @@ export function createRestoresService({ prisma, now = () => new Date(), auditSer
     return a;
   }
 
+  /** Restores every data artifact of the safety backup in place and checks it matches. Never throws. */
+  async function rollbackFromSafety(safetyRunId, projectId) {
+    try {
+      const artifacts = (await prisma.backupArtifact.findMany({ where: { backupRunId: safetyRunId } })).filter((a) => a.kind !== 'manifest');
+      if (!artifacts.length) return false;
+      const items = [];
+      for (const a of artifacts) items.push({ kind: a.kind, bytes: (await backups.verifyArtifactBytes(a)).plain });
+      const result = await adapters.backupEngine.restore({ mode: 'inplace', projectId, items });
+      return Boolean(result.restored) && items.every((i) => result.checksums?.[i.kind] === sha256(i.bytes));
+    } catch {
+      return false;
+    }
+  }
+
   return {
     async listRestorePoints({ projectId, limit }, actor) {
       const projectClause = await scope.projectClause(actor, projectId);
@@ -108,11 +122,12 @@ export function createRestoresService({ prisma, now = () => new Date(), auditSer
       const gate = await platform.gate({ action, resourceType: 'restore_run', resourceId: id, approvalId: run.correlationId }, actor);
       let state = await move(run, 'approved', { approvedById: gate.approval.approverId });
       let safetyBackupRunId = null;
-      const fail = async (code, message) => {
+      const fail = async (code, message, extra = {}) => {
         if (RESTORE_TRANSITIONS[state.status]?.includes('failed')) await move(state, 'failed');
-        await audit({ actorId: actor.id, action: 'restore.execute', resourceType: 'restore_run', resourceId: id, environmentId: input.environmentId, result: 'failure', metadata: { code, stage: state.status, safetyBackupRunId } });
+        await audit({ actorId: actor.id, action: 'restore.execute', resourceType: 'restore_run', resourceId: id, environmentId: input.environmentId, result: 'failure', metadata: { code, stage: state.status, safetyBackupRunId, ...extra } });
         const e = new AppError(502, code, message);
         e.handled = true;
+        Object.assign(e, extra);
         throw e;
       };
       try {
@@ -131,7 +146,18 @@ export function createRestoresService({ prisma, now = () => new Date(), auditSer
         }
         state = await move(state, 'health_check');
         const health = await adapters.backupEngine.health({ mode, projectId: policy.projectId });
-        if (!health.healthy) return await fail('RESTORE_HEALTH_FAILED', safetyBackupRunId ? `Health check failed; roll back using safety backup ${safetyBackupRunId}` : 'Health check failed');
+        if (!health.healthy) {
+          if (!safetyBackupRunId) return await fail('RESTORE_HEALTH_FAILED', 'Health check failed', { rolledBack: false });
+          // In-place restore left the target unhealthy: put back the data captured by the safety backup.
+          const rolledBack = await rollbackFromSafety(safetyBackupRunId, policy.projectId);
+          return await fail(
+            'RESTORE_HEALTH_FAILED',
+            rolledBack
+              ? `Health check failed; previous data was restored automatically from safety backup ${safetyBackupRunId}`
+              : `Health check failed and automatic rollback failed; roll back manually using safety backup ${safetyBackupRunId}`,
+            { rolledBack },
+          );
+        }
       } catch (err) {
         if (err.handled) throw err;
         return await fail(err.code ?? 'RESTORE_FAILED', err.message ?? 'Restore failed');

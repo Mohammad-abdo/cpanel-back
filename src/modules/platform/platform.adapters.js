@@ -1,16 +1,34 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import path from 'node:path';
 
 /**
  * Simulated adapters. They never touch a real server, DNS provider, ACME CA, database, backup target,
  * firewall or Wazuh. Real adapters (certbot, mysqldump, restic, ufw, Wazuh API) are NOT_RUN and must be
  * supplied by the deployment; every service takes these interfaces by injection.
  */
-export function createSimulatedAdapters({ now = () => new Date() } = {}) {
+/**
+ * Simulated offsite storage. In memory by default (tests). With `dir`, objects persist on disk so a
+ * dev API restart does not make every stored backup unreadable. File names are sha256(name): no traversal.
+ */
+export function createSimulatedObjectStore(dir = null) {
+  if (!dir) return new Map();
+  const root = path.resolve(dir);
+  mkdirSync(root, { recursive: true });
+  const file = (name) => path.join(root, `${createHash('sha256').update(String(name)).digest('hex')}.bin`);
+  return {
+    set(name, bytes) { writeFileSync(file(name), bytes); },
+    get(name) { const p = file(name); return existsSync(p) ? readFileSync(p) : undefined; },
+    delete(name) { rmSync(file(name), { force: true }); },
+  };
+}
+
+export function createSimulatedAdapters({ now = () => new Date(), storeDir = null } = {}) {
   const calls = [];
   const rec = (name, arg) => {
     calls.push({ name, arg });
   };
-  const store = new Map();
+  const store = createSimulatedObjectStore(storeDir);
 
   return {
     simulated: true,

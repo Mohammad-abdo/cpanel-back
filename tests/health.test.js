@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { createApp } from '../src/app.js';
+import { createApp, jsonReplacer } from '../src/app.js';
 import { parseEnv } from '../src/config/env.js';
 import { errorHandler } from '../src/common/middleware/error-handler.js';
 import express from 'express';
@@ -48,5 +48,15 @@ describe('API foundation', () => {
     expect(() => parseEnv({ PORT: '0' })).toThrow('PORT');
     expect(() => parseEnv({ NODE_ENV: 'private-value' })).toThrow('NODE_ENV');
     expect(() => parseEnv({ NODE_ENV: 'private-value' })).not.toThrow('private-value');
+  });
+});
+
+describe('JSON serialization', () => {
+  it('serializes Prisma BigInt values instead of failing with 500', () => {
+    const body = JSON.stringify({ sizeBytes: 1024n, huge: 2n ** 64n, n: 1 }, jsonReplacer);
+    expect(JSON.parse(body)).toEqual({ sizeBytes: 1024, huge: '18446744073709551616', n: 1 });
+  });
+  it('is installed on the app', () => {
+    expect(createApp().get('json replacer')).toBe(jsonReplacer);
   });
 });

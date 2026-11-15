@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AppError } from '../../common/errors/app-error.js';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../..');
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 export const DEFAULT_ARTIFACT_DIR = path.join(REPO_ROOT, '.data', 'artifacts');
 export const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 

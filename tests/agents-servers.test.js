@@ -37,6 +37,7 @@ describe('agent enrollment', () => {
     const t = tx();
     const prisma = {
       agentEnrollment: { findUnique: vi.fn().mockResolvedValue({ id: 'e', serverId: SID, usedAt: null, expiresAt: new Date(NOW.getTime() + 1000) }) },
+      serverAgent: { findFirst: vi.fn().mockResolvedValue(null) },
       $transaction: (fn) => fn(t),
     };
     const out = await createAgentsService({ prisma, now }).enroll({ token: 'x'.repeat(30) });
@@ -50,9 +51,21 @@ describe('agent enrollment', () => {
     t.agentEnrollment.updateMany.mockResolvedValue({ count: 0 });
     const prisma = {
       agentEnrollment: { findUnique: vi.fn().mockResolvedValue({ id: 'e', serverId: SID, usedAt: null, expiresAt: new Date(NOW.getTime() + 1000) }) },
+      serverAgent: { findFirst: vi.fn().mockResolvedValue(null) },
       $transaction: (fn) => fn(t),
     };
     await expect(createAgentsService({ prisma, now }).enroll({ token: 'x'.repeat(30) })).rejects.toMatchObject({ code: 'ENROLLMENT_INVALID' });
+  });
+  it('returns 409 for a server with an active agent and leaves the token unclaimed', async () => {
+    const t = tx();
+    const prisma = {
+      agentEnrollment: { findUnique: vi.fn().mockResolvedValue({ id: 'e', serverId: SID, usedAt: null, expiresAt: new Date(NOW.getTime() + 1000) }) },
+      serverAgent: { findFirst: vi.fn().mockResolvedValue({ id: 'a', serverId: SID, revokedAt: null }) },
+      $transaction: (fn) => fn(t),
+    };
+    await expect(createAgentsService({ prisma, now }).enroll({ token: 'x'.repeat(30) })).rejects.toMatchObject({ status: 409, code: 'AGENT_ALREADY_ENROLLED' });
+    expect(t.agentEnrollment.updateMany).not.toHaveBeenCalled();
+    expect(t.serverAgent.create).not.toHaveBeenCalled();
   });
 });
 

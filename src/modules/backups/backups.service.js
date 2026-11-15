@@ -3,6 +3,7 @@ import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { decrypt, encrypt, sha256 } from '../platform/platform.crypto.js';
+import { SYSTEM_ACTOR, isSystemActor } from '../../common/system-actor.js';
 
 /** Scheduled -> Queued -> Snapshot/Dump -> Encrypt -> Upload -> Verify -> Retain (required.md section 11). */
 export const BACKUP_TRANSITIONS = Object.freeze({
@@ -20,14 +21,18 @@ export const ACTIVE_STATES = ['scheduled', 'queued', 'snapshot', 'encrypt', 'upl
 /** Retention never leaves fewer verified sets than this, so a compromised app cannot wipe every backup. */
 export const MIN_VERIFIED_KEEP = 3;
 const DAY = 86400000;
+/** How often each policy frequency is due, and how soon a failed scheduled run is retried. */
+export const FREQUENCY_MS = Object.freeze({ hourly: 3600000, daily: DAY, weekly: 7 * DAY });
+export const FAILED_RETRY_MS = 15 * 60000;
 
 export function createBackupsService({ prisma, now = () => new Date(), auditService = null, rbac = null, platform = null, adapters = null, encryptionKey = () => process.env.BACKUP_ENCRYPTION_KEY }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
 
   async function authorize(actor, projectId, environmentId, permissionKey = PERM.BACKUP_CREATE) {
-    if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+    if (!actor?.id && !isSystemActor(actor)) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
     const env = await prisma.projectEnvironment.findUnique({ where: { id: environmentId } });
     if (!env || env.projectId !== projectId) throw new AppError(409, 'ENVIRONMENT_PROJECT_MISMATCH', 'Environment does not belong to this project');
+    if (isSystemActor(actor)) return; // scheduled job acting on an Owner-approved policy
     await assertCan(rbac, actor, { permissionKey, resourceType: 'project', resourceId: projectId, environmentId });
   }
 
@@ -144,7 +149,7 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
         if (missing.length) throw new AppError(500, 'MANIFEST_INCOMPLETE', `Backup set is incomplete: ${missing.join(', ')}`);
         await stage('retained');
         run = { ...run, ...(await prisma.backupRun.update({ where: { id: run.id }, data: { finishedAt: now(), verificationStatus: 'verified' } })) };
-        await audit({ actorId: actor.id, action: 'backup.run', resourceType: 'backup_policy', resourceId: policyId, environmentId: input.environmentId, result: 'success', after: { runId: run.id, kinds: input.kinds, trigger: input.trigger } });
+        await audit({ actorId: actor.id ?? null, action: 'backup.run', resourceType: 'backup_policy', resourceId: policyId, environmentId: input.environmentId, result: 'success', after: { runId: run.id, kinds: input.kinds, trigger: input.trigger } });
         return { run, artifacts: saved.map((s) => ({ id: s.id, kind: s.kind, checksum: s.checksum })), simulated: Boolean(adapters.simulated) };
       } catch (err) {
         for (const ref of uploaded) await adapters.backupEngine.remove({ locationRef: ref }).catch(() => {});
@@ -152,9 +157,58 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
         if (BACKUP_TRANSITIONS[run.status]?.includes('failed')) {
           await prisma.backupRun.update({ where: { id: run.id }, data: { status: 'failed', finishedAt: now(), verificationStatus: 'failed' } });
         }
-        await audit({ actorId: actor.id, action: 'backup.run', resourceType: 'backup_policy', resourceId: policyId, environmentId: input.environmentId, result: 'failure', metadata: { failedStage: failedFrom, code: err.code ?? 'ERROR' } });
+        await audit({ actorId: actor.id ?? null, action: 'backup.run', resourceType: 'backup_policy', resourceId: policyId, environmentId: input.environmentId, result: 'failure', metadata: { failedStage: failedFrom, code: err.code ?? 'ERROR' } });
         throw err instanceof AppError ? err : new AppError(502, 'BACKUP_FAILED', `Backup failed during ${failedFrom}`);
       }
+    },
+
+    /**
+     * Scheduled backups (Scheduled step of the lifecycle). A policy is due when its newest attempt is
+     * older than its frequency; a failed attempt is retried after FAILED_RETRY_MS. One failing policy
+     * never blocks the others.
+     */
+    async runDue(at = now()) {
+      const policies = await prisma.backupPolicy.findMany({ where: { archivedAt: null } });
+      const out = [];
+      for (const p of policies) {
+        const every = FREQUENCY_MS[p.frequency];
+        if (!every || !p.environmentId) continue;
+        const last = await prisma.backupRun.findFirst({ where: { policyId: p.id }, orderBy: { startedAt: 'desc' } });
+        const since = last?.startedAt ? at.getTime() - new Date(last.startedAt).getTime() : Infinity;
+        const due = !last || (last.status === 'failed' ? since >= Math.min(every, FAILED_RETRY_MS) : since >= every);
+        if (!due || ACTIVE_STATES.includes(last?.status)) continue;
+        try {
+          const res = await this.runBackup(p.id, { environmentId: p.environmentId, kinds: ['db', 'config'], trigger: 'scheduled' }, SYSTEM_ACTOR);
+          out.push({ policyId: p.id, ok: true, runId: res.run.id });
+        } catch (err) {
+          out.push({ policyId: p.id, ok: false, code: err.code ?? 'BACKUP_FAILED' });
+        }
+      }
+      return out;
+    },
+
+    /** Scheduled verification: re-reads the newest verified set of every policy from offsite storage. */
+    async verifyLatest() {
+      const policies = await prisma.backupPolicy.findMany({ where: { archivedAt: null } });
+      const out = [];
+      for (const p of policies) {
+        const last = await prisma.backupRun.findFirst({ where: { policyId: p.id, status: 'retained', verificationStatus: 'verified' }, orderBy: { finishedAt: 'desc' } });
+        if (!last) continue;
+        const artifacts = await prisma.backupArtifact.findMany({ where: { backupRunId: last.id } });
+        let failed = null;
+        for (const a of artifacts) {
+          try {
+            await verifyArtifactBytes(a);
+          } catch (err) {
+            failed = { artifactId: a.id, code: err.code ?? 'VERIFY_FAILED' };
+            break;
+          }
+        }
+        if (failed) await prisma.backupRun.update({ where: { id: last.id }, data: { verificationStatus: 'failed' } });
+        await audit({ actorId: null, action: 'backup.verify.scheduled', resourceType: 'backup_run', resourceId: last.id, result: failed ? 'failure' : 'success', metadata: failed ?? { artifacts: artifacts.length } });
+        out.push({ policyId: p.id, runId: last.id, ok: !failed, ...(failed ?? {}) });
+      }
+      return out;
     },
 
     /** Re-verify a stored artifact against offsite storage (checksum then authenticated decryption). */

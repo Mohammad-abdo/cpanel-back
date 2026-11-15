@@ -128,3 +128,40 @@ describe('restores: rejections', () => {
     expect(pts[0].artifacts.map((a) => a.kind)).not.toContain('manifest');
   });
 });
+
+describe('restores: automatic rollback', () => {
+  it('in-place restore with failed health check restores the safety backup automatically', async () => {
+    const t = await setup();
+    const r = await t.restores.request(req(t, { mode: 'inplace' }), OWNER);
+    await approve(t, r.approval.id);
+    t.adapters.backupEngine.health = vi.fn(async () => ({ healthy: false }));
+    const err = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER).catch((e) => e);
+    expect(err).toMatchObject({ code: 'RESTORE_HEALTH_FAILED', rolledBack: true });
+    const restores = t.adapters.calls.filter((c) => c.name === 'backup.restore');
+    expect(restores).toHaveLength(2); // the restore, then the rollback
+    expect(restores[1].arg.mode).toBe('inplace');
+    const ev = t.auditService.record.mock.calls.map((c) => c[0]).find((e) => e.action === 'restore.execute');
+    expect(ev.metadata).toMatchObject({ rolledBack: true, safetyBackupRunId: expect.any(String) });
+  });
+  it('reports a failed rollback so the operator rolls back manually', async () => {
+    const t = await setup();
+    const r = await t.restores.request(req(t, { mode: 'inplace' }), OWNER);
+    await approve(t, r.approval.id);
+    t.adapters.backupEngine.health = vi.fn(async () => ({ healthy: false }));
+    const real = t.adapters.backupEngine.restore;
+    let n = 0;
+    t.adapters.backupEngine.restore = vi.fn(async (input) => (++n === 1 ? real(input) : { restored: false }));
+    const err = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER).catch((e) => e);
+    expect(err).toMatchObject({ code: 'RESTORE_HEALTH_FAILED', rolledBack: false });
+    expect(err.message).toMatch(/roll back manually/);
+  });
+  it('isolated restore never rolls back (production untouched)', async () => {
+    const t = await setup();
+    const r = await t.restores.request(req(t), OWNER);
+    await approve(t, r.approval.id);
+    t.adapters.backupEngine.health = vi.fn(async () => ({ healthy: false }));
+    const err = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER).catch((e) => e);
+    expect(err).toMatchObject({ code: 'RESTORE_HEALTH_FAILED', rolledBack: false });
+    expect(t.adapters.calls.filter((c) => c.name === 'backup.restore')).toHaveLength(1);
+  });
+});

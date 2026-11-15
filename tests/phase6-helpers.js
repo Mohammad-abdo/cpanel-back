@@ -86,12 +86,13 @@ export function backupPrisma({ runs = [], artifacts = [] } = {}, policy = BACKUP
     runStore,
     artStore,
     projectEnvironment: { findUnique: vi.fn(async ({ where }) => ({ id: where.id, projectId: PROJECT })) },
-    backupPolicy: { findUnique: vi.fn(async () => policy), create: vi.fn(async ({ data }) => ({ id: policy.id, ...data })) },
+    backupPolicy: { findMany: vi.fn(async () => [policy]), findUnique: vi.fn(async () => policy), create: vi.fn(async ({ data }) => ({ id: policy.id, ...data })) },
     backupRun: {
       create: vi.fn(async ({ data }) => { const r = { id: U(++n), ...data }; runStore.set(r.id, r); return r; }),
       update: vi.fn(async ({ where, data }) => { Object.assign(runStore.get(where.id), data); return runStore.get(where.id); }),
       findFirst: vi.fn(async ({ where }) => {
         const all = [...runStore.values()];
+        if (where.status === undefined) return all.filter((r) => r.policyId === where.policyId).sort((a, b) => b.startedAt - a.startedAt)[0] ?? null;
         if (where.status?.in) return all.find((r) => where.status.in.includes(r.status)) ?? null;
         return all.filter((r) => r.status === where.status && r.verificationStatus === where.verificationStatus).sort((a, b) => b.finishedAt - a.finishedAt)[0] ?? null;
       }),

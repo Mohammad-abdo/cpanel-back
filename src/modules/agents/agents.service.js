@@ -27,6 +27,12 @@ export function createAgentsService({ prisma, now = () => new Date(), auditServi
       if (!enrollment || enrollment.usedAt || enrollment.expiresAt <= now()) {
         throw new AppError(401, 'ENROLLMENT_INVALID', 'Enrollment token invalid or expired');
       }
+      // One active agent per server: re-enrolling requires revoking the current agent first.
+      // Checked before the token is claimed so the token stays usable after a revoke.
+      const active = await prisma.serverAgent.findFirst({ where: { serverId: enrollment.serverId, revokedAt: null } });
+      if (active) {
+        throw new AppError(409, 'AGENT_ALREADY_ENROLLED', 'Server already has an active agent; revoke it before enrolling a new one');
+      }
       const agentKey = randomBytes(32).toString('base64url');
       const agentPublicId = randomUUID();
       await prisma.$transaction(async (tx) => {

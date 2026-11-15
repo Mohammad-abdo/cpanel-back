@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { BACKUP_TRANSITIONS, MIN_VERIFIED_KEEP, createBackupsService } from '../src/modules/backups/backups.service.js';
 import { createPolicyBodySchema } from '../src/modules/backups/backups.validator.js';
 import { decrypt } from '../src/modules/platform/platform.crypto.js';
-import { DEV, ENV_PROD, ENV_STAGING, KEY, OWNER, PROJECT, U, approve, backupPrisma, makeCtx } from './phase6-helpers.js';
+import { BACKUP_POLICY, DEV, ENV_PROD, ENV_STAGING, KEY, OWNER, PROJECT, U, approve, backupPrisma, makeCtx } from './phase6-helpers.js';
+import { SYSTEM_ACTOR } from '../src/common/system-actor.js';
 
 const POLICY = U(90);
 const NOW = new Date('2026-06-01T12:00:00Z');
@@ -155,5 +156,56 @@ describe('backups: retention', () => {
     const done = await t.svc.applyRetention(POLICY, { ...body, approvalId: first.approval.id }, OWNER);
     expect(done.deleted).toBeGreaterThan(0);
     expect([...t.extra.runStore.values()].filter((r) => r.status === 'expired')).toHaveLength(done.deleted);
+  });
+});
+
+describe('backups: scheduled runs and verification', () => {
+  const daily = { ...BACKUP_POLICY, frequency: 'daily' };
+  function sched(runs = []) {
+    const extra = backupPrisma({ runs }, daily);
+    const ctx = makeCtx({ now: () => NOW });
+    Object.assign(ctx.prisma, extra);
+    return { ...ctx, extra, svc: createBackupsService({ ...ctx, encryptionKey: () => KEY }) };
+  }
+  const ago = (ms) => new Date(NOW.getTime() - ms);
+
+  it('runs a due policy as the system actor with trigger scheduled', async () => {
+    const t = sched();
+    const out = await t.svc.runDue(NOW);
+    expect(out).toEqual([expect.objectContaining({ policyId: POLICY, ok: true })]);
+    const made = [...t.extra.runStore.values()][0];
+    expect(made.status).toBe('retained');
+    const ev = t.auditService.record.mock.calls.map((c) => c[0]).find((e) => e.action === 'backup.run');
+    expect(ev).toMatchObject({ actorId: null, result: 'success', after: expect.objectContaining({ trigger: 'scheduled' }) });
+  });
+  it('skips a policy whose last run is newer than its frequency', async () => {
+    const t = sched([{ id: U(700), policyId: POLICY, status: 'retained', startedAt: ago(3600000) }]);
+    expect(await t.svc.runDue(NOW)).toEqual([]);
+  });
+  it('retries a failed run after 15 minutes, not before', async () => {
+    const early = sched([{ id: U(701), policyId: POLICY, status: 'failed', startedAt: ago(5 * 60000) }]);
+    expect(await early.svc.runDue(NOW)).toEqual([]);
+    const later = sched([{ id: U(702), policyId: POLICY, status: 'failed', startedAt: ago(20 * 60000) }]);
+    expect((await later.svc.runDue(NOW))[0]).toMatchObject({ ok: true });
+  });
+  it('reports a failing policy without throwing', async () => {
+    const t = sched();
+    t.adapters.backupEngine.dump = vi.fn(async () => { throw new Error('disk full'); });
+    expect(await t.svc.runDue(NOW)).toEqual([expect.objectContaining({ ok: false, code: 'BACKUP_FAILED' })]);
+  });
+  it('scheduled verification flags a corrupted newest set', async () => {
+    const t = sched();
+    await t.svc.runDue(NOW);
+    expect((await t.svc.verifyLatest())[0]).toMatchObject({ ok: true });
+    const db = [...t.extra.artStore.values()].find((a) => a.kind === 'db');
+    await t.adapters.backupEngine.upload({ name: db.locationRef.replace('sim://offsite/', ''), bytes: Buffer.from('tampered') });
+    const res = await t.svc.verifyLatest();
+    expect(res[0]).toMatchObject({ ok: false, code: 'CHECKSUM_MISMATCH' });
+    expect([...t.extra.runStore.values()][0].verificationStatus).toBe('failed');
+  });
+  it('only the exact system actor bypasses the user check', async () => {
+    const t = sched();
+    await expect(t.svc.runBackup(POLICY, run, { id: null, isOwner: true, system: true })).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+    await expect(t.svc.runBackup(POLICY, run, SYSTEM_ACTOR)).resolves.toBeTruthy();
   });
 });
