@@ -238,6 +238,7 @@ model Server {
   updatedAt   DateTime  @updatedAt
 
   agent      ServerAgent?
+  credential ServerCredential?
   services   ServerService[]
   ports      ServerPort[]
   snapshots  ServerSnapshot[]
@@ -1085,4 +1086,23 @@ model LogEntry {
   @@index([projectId, occurredAt])
   @@index([severity, occurredAt])
   @@index([requestId])
+}
+
+/// SSH access for the Owner's file manager and terminal (Owner decision 2026-11-15).
+/// The password is AES-256-GCM encrypted with CREDENTIAL_ENCRYPTION_KEY and never returned by the API.
+model ServerCredential {
+  id                 String    @id @default(uuid())
+  serverId           String    @unique
+  host               String
+  port               Int       @default(22)
+  username           String
+  authType           String    @default("password")
+  secretEnc          Bytes     @db.Blob
+  hostKeySha256      String?
+  lastConnectedAt    DateTime?
+  createdById        String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
 }
