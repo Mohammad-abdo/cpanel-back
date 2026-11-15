@@ -10,6 +10,27 @@ import ssh2 from 'ssh2';
 const { Server, utils } = ssh2;
 const { STATUS_CODE, flagsToString } = utils.sftp;
 
+/** Output of the panel's system-info script on a typical Ubuntu server (test fixture). */
+const infoFixture = (hostname) =>
+  [
+    '##os', 'Ubuntu 24.04.1 LTS',
+    '##kernel', 'Linux 6.8.0-test',
+    '##hostname', hostname,
+    '##uptime', '864123.45',
+    '##load', '0.42 0.35 0.30 2/312 4242',
+    '##cpus', '4',
+    '##mem', '8335548416 3221225472 4831838208',
+    '##swap', '2147479552 104857600',
+    '##disk', '/dev/sda1 105089261568 42035704627 57685823488 43% /', '/dev/sdb1 527295578112 105459115622 394947534848 21% /var/lib/mysql',
+    '##procs', '1213 mysql 12.5 9.8 mysqld', '2201 www-data 4.1 2.2 php-fpm8.3', '980 root 1.0 0.4 nginx',
+    '##services',
+    'nginx.service loaded active running A high performance web server',
+    'mysql.service loaded active running MySQL Community Server',
+    'php8.3-fpm.service loaded active running PHP FastCGI Process Manager',
+    'redis-server.service loaded inactive dead Advanced key-value store',
+    '##ports', 'tcp LISTEN 0 511 0.0.0.0:80 0.0.0.0:*', 'tcp LISTEN 0 511 0.0.0.0:443 0.0.0.0:*', 'tcp LISTEN 0 151 127.0.0.1:3306 0.0.0.0:*', 'tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:*',
+  ].join('\n') + '\n';
+
 export function startSshTestServer({ root, port = 0, host = '127.0.0.1', username = 'tester', password = 'secret-pass', hostname = 'test-host', hostKey = null } = {}) {
   const key = hostKey ?? utils.generateKeyPairSync('ed25519').private;
   const home = `/home/${username}`;
@@ -38,9 +59,19 @@ export function startSshTestServer({ root, port = 0, host = '127.0.0.1', usernam
 
         session.on('exec', (accept, _reject, info) => {
           const stream = accept();
-          const out = info.command.includes('hostname') ? `${hostname}\nLinux 6.8.0-test\n` : 'ok\n';
+          const cmd = info.command;
+          let out = 'ok\n';
+          let code = 0;
+          const svc = /systemctl (start|stop|restart|reload|enable|disable|status) (\S+)/.exec(cmd);
+          if (cmd.includes("echo '##os'")) out = infoFixture(hostname);
+          else if (svc) {
+            const [, action, name] = svc;
+            const missing = name === 'missing-svc';
+            out = missing ? `Failed to ${action} ${name}.service: Unit ${name}.service not found.\n` : `${action} ${name}: done\n`;
+            code = missing ? 5 : 0;
+          } else if (cmd.includes('hostname')) out = `${hostname}\nLinux 6.8.0-test\n`;
           stream.write(out);
-          stream.exit(0);
+          stream.exit(code);
           stream.end();
         });
 

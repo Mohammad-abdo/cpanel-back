@@ -15,6 +15,7 @@ import {
   pathQuerySchema,
   renameBodySchema,
   serverIdParamsSchema,
+  serviceBodySchema,
   writeBodySchema,
 } from './server-access.validator.js';
 
@@ -39,6 +40,8 @@ serverAccessRouter.get('/:id/ssh', owner, params, wrap(c.getCredential));
 serverAccessRouter.put('/:id/ssh', owner, params, validate(credentialBodySchema, 'body'), wrap(c.setCredential));
 serverAccessRouter.delete('/:id/ssh', owner, params, wrap(c.removeCredential));
 serverAccessRouter.post('/:id/ssh/test', owner, params, wrap(c.test));
+serverAccessRouter.get('/:id/ssh/info', owner, params, wrap(c.info));
+serverAccessRouter.post('/:id/ssh/service', owner, params, validate(serviceBodySchema, 'body'), wrap(c.service));
 
 serverAccessRouter.get('/:id/files', owner, params, validate(listQuerySchema, 'query'), wrap(c.list));
 serverAccessRouter.get('/:id/files/content', owner, params, validate(pathQuerySchema, 'query'), wrap(c.read));

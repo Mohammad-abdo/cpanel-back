@@ -36,3 +36,10 @@ export const deleteQuerySchema = z
 export const writeBodySchema = z.object({ path: remotePath, content: z.string().max(1024 * 1024) }).strict();
 export const mkdirBodySchema = z.object({ path: remotePath }).strict();
 export const renameBodySchema = z.object({ from: remotePath, to: remotePath }).strict();
+
+export const serviceBodySchema = z
+  .object({
+    name: z.string().regex(/^[A-Za-z0-9@._-]{1,100}$/, 'Invalid service name'),
+    action: z.enum(['start', 'stop', 'restart', 'reload', 'status', 'enable', 'disable']),
+  })
+  .strict();

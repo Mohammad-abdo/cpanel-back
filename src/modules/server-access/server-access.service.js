@@ -9,6 +9,69 @@ export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 export const MAX_RECURSIVE_DELETE = 5000;
 export const TICKET_TTL_MS = 30_000;
+export const SERVICE_NAME = /^[A-Za-z0-9@._-]{1,100}$/;
+export const SERVICE_ACTIONS = ['start', 'stop', 'restart', 'reload', 'status', 'enable', 'disable'];
+
+/** One fixed, read-only script (no user input) that prints labelled sections. */
+export const INFO_SCRIPT = [
+  "echo '##os'; (. /etc/os-release 2>/dev/null && echo \"$PRETTY_NAME\")",
+  "echo '##kernel'; uname -sr",
+  "echo '##hostname'; hostname",
+  "echo '##uptime'; cut -d' ' -f1 /proc/uptime",
+  "echo '##load'; cat /proc/loadavg",
+  "echo '##cpus'; nproc",
+  "echo '##mem'; free -b | awk 'NR==2{print $2, $3, $7}'",
+  "echo '##swap'; free -b | awk 'NR==3{print $2, $3}'",
+  "echo '##disk'; df -PB1 -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | tail -n +2",
+  "echo '##procs'; ps -eo pid=,user=,pcpu=,pmem=,comm= --sort=-pcpu | head -n 12",
+  "echo '##services'; systemctl list-units --type=service --all --no-legend --no-pager --plain 2>/dev/null | head -n 400",
+  "echo '##ports'; ss -tulnH 2>/dev/null | head -n 200",
+].join('; ');
+
+/** Parses INFO_SCRIPT output into structured data. Unknown or missing sections stay empty. */
+export function parseServerInfo(text) {
+  const sec = {};
+  let cur = null;
+  for (const line of String(text).split('\n')) {
+    const m = /^##(\w+)$/.exec(line.trim());
+    if (m) {
+      cur = m[1];
+      sec[cur] = [];
+    } else if (cur && line.trim()) sec[cur].push(line.trim());
+  }
+  const ws = /\s+/;
+  const num = (v) => (v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+  const [memTotal, memUsed, memAvail] = (sec.mem?.[0] ?? '').split(ws).map(num);
+  const [swapTotal, swapUsed] = (sec.swap?.[0] ?? '').split(ws).map(num);
+  const load = (sec.load?.[0] ?? '').split(ws);
+  return {
+    os: sec.os?.[0] ?? null,
+    kernel: sec.kernel?.[0] ?? null,
+    hostname: sec.hostname?.[0] ?? null,
+    uptimeSec: num(sec.uptime?.[0]) === null ? null : Math.floor(num(sec.uptime[0])),
+    load: { m1: num(load[0]), m5: num(load[1]), m15: num(load[2]) },
+    cpus: num(sec.cpus?.[0]),
+    memory: { total: memTotal ?? null, used: memUsed ?? null, available: memAvail ?? null },
+    swap: { total: swapTotal ?? null, used: swapUsed ?? null },
+    disks: (sec.disk ?? []).map((l) => {
+      const [fs, size, used, avail, , mount] = l.split(ws);
+      return { fs, mount, size: num(size), used: num(used), available: num(avail) };
+    }),
+    processes: (sec.procs ?? []).map((l) => {
+      const [pid, user, cpu, mem, ...cmd] = l.split(ws);
+      return { pid: num(pid), user, cpu: num(cpu), mem: num(mem), command: cmd.join(' ') };
+    }),
+    services: (sec.services ?? []).map((l) => {
+      const [unit, load2, active, sub, ...desc] = l.split(ws);
+      return { name: unit.replace(/\.service$/, ''), load: load2, active, sub, description: desc.join(' ') };
+    }),
+    ports: (sec.ports ?? []).map((l) => {
+      const p = l.split(ws);
+      const local = p[4] ?? '';
+      return { proto: p[0], state: p[1], local, port: num(local.slice(local.lastIndexOf(':') + 1)) };
+    }),
+  };
+}
 
 const S_IFMT = 0o170000;
 const TYPE = { 0o040000: 'dir', 0o100000: 'file', 0o120000: 'link' };
@@ -296,6 +359,39 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         await audit({ actorId: actor.id, action: 'server.file.delete', resourceId: serverId, result: 'success', before: { path: p, recursive } });
         return { deleted: p };
       });
+    },
+
+    // ---- system information and service control ---------------------------------------------
+    async info(serverId, actor) {
+      requireOwner(actor);
+      const cred = await loadCredential(serverId);
+      const { client } = await connectWith(cred);
+      try {
+        const res = await execCommand(client, INFO_SCRIPT, { maxBytes: 512 * 1024, timeoutMs: 15_000 });
+        return { ...parseServerInfo(res.stdout), collectedAt: now().toISOString() };
+      } finally {
+        client.end();
+      }
+    },
+
+    /** systemctl <action> <name>. The name is validated, so it is a single safe argument. */
+    async service(serverId, { name, action }, actor) {
+      requireOwner(actor);
+      if (!SERVICE_NAME.test(name ?? '')) throw new AppError(422, 'SERVICE_NAME_INVALID', 'Invalid service name');
+      if (!SERVICE_ACTIONS.includes(action)) throw new AppError(422, 'SERVICE_ACTION_INVALID', 'Invalid service action');
+      const cred = await loadCredential(serverId);
+      const { client } = await connectWith(cred);
+      try {
+        const sudo = cred.username === 'root' ? '' : 'sudo -n ';
+        const res = await execCommand(client, `${sudo}systemctl ${action} ${name} --no-pager 2>&1`, { timeoutMs: 60_000 });
+        const ok = res.code === 0 || (action === 'status' && res.code !== null && res.code <= 4);
+        if (action !== 'status') {
+          await audit({ actorId: actor.id, action: `server.service.${action}`, resourceId: serverId, result: ok ? 'success' : 'failure', after: { service: name, exitCode: res.code } });
+        }
+        return { name, action, ok, exitCode: res.code, output: res.stdout.slice(-8000) };
+      } finally {
+        client.end();
+      }
     },
 
     // ---- terminal ----------------------------------------------------------------------------

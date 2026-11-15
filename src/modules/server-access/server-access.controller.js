@@ -45,6 +45,12 @@ export function createServerAccessController(svc) {
     async remove(req, res) {
       res.status(200).json({ data: await svc.remove(id(req), req.validated.query, req.user) });
     },
+    async info(req, res) {
+      res.status(200).json({ data: await svc.info(id(req), req.user) });
+    },
+    async service(req, res) {
+      res.status(200).json({ data: await svc.service(id(req), req.validated.body, req.user) });
+    },
     async ticket(req, res) {
       res.status(201).json({ data: await svc.createTicket(id(req), req.user) });
     },

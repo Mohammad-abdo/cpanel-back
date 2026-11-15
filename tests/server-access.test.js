@@ -154,6 +154,34 @@ describe('file manager over SFTP', () => {
   });
 });
 
+describe('system information and services over SSH', () => {
+  it('collects and parses system information', async () => {
+    const t = await added();
+    const info = await t.svc.info(t.serverId, OWNER);
+    expect(info).toMatchObject({ os: 'Ubuntu 24.04.1 LTS', cpus: 4, uptimeSec: 864123, load: { m1: 0.42 } });
+    expect(info.memory.total).toBe(8335548416);
+    expect(info.disks.map((d) => d.mount)).toEqual(['/', '/var/lib/mysql']);
+    expect(info.services.find((s) => s.name === 'nginx')).toMatchObject({ active: 'active', sub: 'running' });
+    expect(info.ports.map((p) => p.port)).toEqual([80, 443, 3306, 22]);
+    expect(info.processes[0]).toMatchObject({ command: 'mysqld', cpu: 12.5 });
+  });
+  it('restarts a service, reports failures, and audits changes', async () => {
+    const t = await added();
+    expect(await t.svc.service(t.serverId, { name: 'nginx', action: 'restart' }, OWNER)).toMatchObject({ ok: true, exitCode: 0 });
+    expect(await t.svc.service(t.serverId, { name: 'missing-svc', action: 'restart' }, OWNER)).toMatchObject({ ok: false, exitCode: 5 });
+    const events = t.auditService.record.mock.calls.map((c) => c[0]).filter((e) => e.action === 'server.service.restart');
+    expect(events.map((e) => e.result)).toEqual(['success', 'failure']);
+  });
+  it('rejects injection in service names and non-owners', async () => {
+    const t = await added();
+    for (const name of ['nginx; rm -rf /', 'a b', '$(id)', '`id`', '']) {
+      await expect(t.svc.service(t.serverId, { name, action: 'restart' }, OWNER)).rejects.toMatchObject({ code: 'SERVICE_NAME_INVALID' });
+    }
+    await expect(t.svc.service(t.serverId, { name: 'nginx', action: 'reboot' }, OWNER)).rejects.toMatchObject({ code: 'SERVICE_ACTION_INVALID' });
+    await expect(t.svc.info(t.serverId, DEV)).rejects.toMatchObject({ code: 'OWNER_ONLY' });
+  });
+});
+
 describe('terminal', () => {
   it('records commands and redacts a sudo password', () => {
     const tr = createTranscript();
