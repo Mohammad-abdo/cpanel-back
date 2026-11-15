@@ -1,9 +1,0 @@
-# Implementation Roadmap
-
-Status: requirements/specifications, not implemented capabilities. Source: required.md sections 15.
-
-## 15. Roadmap
-
-00 Discovery: inventory/security baseline/recovery/database/API/design. 01 Core: API/Prisma/MySQL/login/MFA/Owner/RBAC/sessions/audit. 02 Agents/monitoring. 03 Projects/deployments/discovery/PM2/Laravel/Git/health/rollback/queue. 04 Observability/Loki/streaming/filters/errors/alerts. 05 Team activity/timeline/contribution/reports/PDF-Excel. 06 Domains/virtual hosts/DNS/SSL/databases. 07 Backup/offsite/restore/verification. 08 Security/incidents/firewall/approvals/access review. 09 Multi-server/load/security/recovery/handover. Do not reorder without explicit approval.
-
-
