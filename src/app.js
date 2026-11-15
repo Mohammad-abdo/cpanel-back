@@ -10,8 +10,8 @@ export function jsonReplacer(_key, value) {
   return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value.toString();
 }
 
-/** Server file editor and upload accept bodies up to 1 MB / 20 MB (see server-access.routes.js). */
-const LARGE_BODY_ROUTE = /^\/api\/v1\/servers\/[^/]+\/files\/(content|upload)$/;
+/** Routes that parse their own larger bodies: server file editor/upload, project env vars bulk set/import. */
+const LARGE_BODY_ROUTE = /^\/api\/v1\/(servers\/[^/]+\/files\/(content|upload)|projects\/[^/]+\/environments\/[^/]+\/vars(\/import)?)$/;
 
 export function createApp() {
   const app = express();

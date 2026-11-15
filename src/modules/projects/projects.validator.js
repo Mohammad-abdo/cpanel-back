@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
-const PROJECT_TYPES = ['node', 'laravel', 'wordpress', 'static', 'custom'];
-const PROCESS_MANAGERS = ['pm2', 'systemd', 'php-fpm', 'apache', 'nginx', 'none', 'custom'];
+/** Any kind of project (Owner decision 2026-11-15). Stored as a string; the list only guards typos. */
+export const PROJECT_TYPES = ['node', 'nextjs', 'nuxt', 'react', 'vue', 'angular', 'laravel', 'php', 'wordpress', 'static', 'python', 'django', 'flask', 'fastapi', 'go', 'java', 'spring', 'dotnet', 'ruby', 'rails', 'docker', 'custom'];
+export const PROCESS_MANAGERS = ['pm2', 'systemd', 'php-fpm', 'apache', 'nginx', 'docker', 'supervisor', 'gunicorn', 'uvicorn', 'passenger', 'none', 'custom'];
 const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/);
 const envCode = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
 const remoteUrl = z.string().min(5).max(300);

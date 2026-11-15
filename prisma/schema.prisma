@@ -352,6 +352,7 @@ model ProjectEnvironment {
   managedDbs   ManagedDatabase[]
   activityEvents ActivityEvent[] @relation("ActivityEnvironment")
   operationJobs OperationJob[]
+  envVars      ProjectEnvVar[]
 
   @@unique([projectId, code])
 }
@@ -1105,4 +1106,21 @@ model ServerCredential {
   updatedAt          DateTime  @updatedAt
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+}
+
+/// Environment variables of one project environment (Owner decision 2026-11-15).
+/// Values are AES-256-GCM encrypted with CREDENTIAL_ENCRYPTION_KEY; secret values are masked unless revealed.
+model ProjectEnvVar {
+  id            String   @id @default(uuid())
+  environmentId String
+  key           String
+  valueEnc      Bytes    @db.Blob
+  isSecret      Boolean  @default(false)
+  updatedById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  environment ProjectEnvironment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+
+  @@unique([environmentId, key])
 }
