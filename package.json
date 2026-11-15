@@ -1,5 +1,5 @@
 {
-  "name": "@nodeteam/api",
+  "name": "nodeteam-api",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,9 +17,6 @@
     "seed": "node prisma/seed.js"
   },
   "dependencies": {
-    "@nodeteam/event-schemas": "0.1.0",
-    "@nodeteam/permission-catalog": "0.1.0",
-    "@nodeteam/shared-contracts": "0.1.0",
     "@prisma/client": "^6.5.0",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
@@ -28,6 +25,7 @@
   "devDependencies": {
     "prisma": "^6.5.0",
     "supertest": "^7.3.2",
+    "vite": "^7.3.8",
     "vitest": "^5.1.0"
   }
 }

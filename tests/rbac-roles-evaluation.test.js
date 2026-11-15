@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createRbacService } from '../src/modules/rbac/rbac.service.js';
 import { ROLE_DEFINITIONS, isRoleAssignableTo, roleHasPermission } from '../src/modules/rbac/rbac.roles.js';
-import { PERMISSION_LIST, PERMISSION_RISK } from '@nodeteam/permission-catalog';
+import { PERMISSION_LIST, PERMISSION_RISK } from '../src/common/permission-catalog.js';
 
 const roleRow = (code, scopeType = '', scopeId = '') => ({
   scopeType,

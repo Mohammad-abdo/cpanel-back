@@ -1,5 +1,5 @@
-import { PERMISSIONS } from '@nodeteam/permission-catalog';
-import { isOperationExpired } from '@nodeteam/shared-contracts';
+import { PERMISSIONS } from '../../common/permission-catalog.js';
+import { isOperationExpired } from '../../common/shared-contracts.js';
 import { AppError } from '../../common/errors/app-error.js';
 import { redact } from '../audit/audit.service.js';
 import { createRbacService } from '../rbac/rbac.service.js';

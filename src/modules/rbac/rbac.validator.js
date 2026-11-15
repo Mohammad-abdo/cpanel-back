@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PERMISSION_LIST } from '@nodeteam/permission-catalog';
+import { PERMISSION_LIST } from '../../common/permission-catalog.js';
 
 const permissionKeySchema = z
   .string()

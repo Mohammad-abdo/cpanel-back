@@ -3,7 +3,7 @@
  * Change the Owner password after first login.
  */
 import { PrismaClient } from '@prisma/client';
-import { PERMISSION_LIST, PERMISSION_RISK, permissionResourceType } from '@nodeteam/permission-catalog';
+import { PERMISSION_LIST, PERMISSION_RISK, permissionResourceType } from '../src/common/permission-catalog.js';
 import { ROLE_DEFINITIONS } from '../src/modules/rbac/rbac.roles.js';
 import { hashPassword } from '../src/common/crypto/password.js';
 

@@ -1,4 +1,4 @@
-import { PERMISSIONS as P } from '@nodeteam/permission-catalog';
+import { PERMISSIONS as P } from '../../common/permission-catalog.js';
 
 /** Seed role definitions (required.md section 7). Owner is never granted through UserRole; it is the user ownerFlag. */
 export const ROLE_DEFINITIONS = Object.freeze({

@@ -1,4 +1,4 @@
-import { PERMISSIONS } from '@nodeteam/permission-catalog';
+import { PERMISSIONS } from '../../common/permission-catalog.js';
 import { AppError } from '../../common/errors/app-error.js';
 import { createProjectAccess } from '../projects/projects.access.js';
 import { createRbacService } from '../rbac/rbac.service.js';

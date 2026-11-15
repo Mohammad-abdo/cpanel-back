@@ -1,4 +1,4 @@
-import { operationEnvelopeSchema } from '@nodeteam/shared-contracts';
+import { operationEnvelopeSchema } from '../../common/shared-contracts.js';
 import { z } from 'zod';
 
 export const enqueueBodySchema = operationEnvelopeSchema;

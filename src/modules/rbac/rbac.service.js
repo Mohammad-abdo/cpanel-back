@@ -1,4 +1,4 @@
-import { permissionRequiresEnvironment } from '@nodeteam/permission-catalog';
+import { permissionRequiresEnvironment } from '../../common/permission-catalog.js';
 import { TEAM_SCOPED_ONLY } from './rbac.roles.js';
 import { AppError } from '../../common/errors/app-error.js';
 
