@@ -8,6 +8,9 @@ const ENROLL_TTL_MS = 60 * 60 * 1000;
 
 // Never expose agent credential material (certFingerprint) through the API.
 const AGENT_PUBLIC = { select: { id: true, agentPublicId: true, lastSeenAt: true, revokedAt: true, createdAt: true } };
+/** SSH login summary for the Owner (never the password). */
+const SSH_PUBLIC = { select: { host: true, port: true, username: true, lastConnectedAt: true } };
+const sshFor = (actor) => (actor?.isOwner ? { credential: SSH_PUBLIC } : {});
 
 /** A silent agent means the data is stale: report offline instead of the last known status. */
 function present(server, now) {
@@ -34,7 +37,7 @@ export function createServersService({ prisma, now = () => new Date(), auditServ
         take: limit,
         ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
         orderBy: { alias: 'asc' },
-        include: { agent: AGENT_PUBLIC, snapshots: { take: 1, orderBy: { capturedAt: 'desc' } } },
+        include: { agent: AGENT_PUBLIC, ...sshFor(actor), snapshots: { take: 1, orderBy: { capturedAt: 'desc' } } },
       });
       return rows.map((r) => present(r, now().getTime()));
     },
@@ -45,6 +48,7 @@ export function createServersService({ prisma, now = () => new Date(), auditServ
         where: { id },
         include: {
           agent: AGENT_PUBLIC,
+          ...sshFor(actor),
           services: true,
           ports: true,
           snapshots: { take: 1, orderBy: { capturedAt: 'desc' } },
