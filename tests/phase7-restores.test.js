@@ -163,6 +163,46 @@ describe('restores: rejections', () => {
   });
 });
 
+describe('restores: panel config in-place', () => {
+  it('restores non-secret env vars from a config artifact into the panel', async () => {
+    const t = await setup();
+    const configArt = [...t.extra.artStore.values()].find((a) => a.kind === 'config');
+    // Replace stored config ciphertext with a panel-env shaped payload.
+    const { encrypt: enc } = await import('../src/modules/platform/platform.crypto.js');
+    const plain = Buffer.from(
+      JSON.stringify({
+        projectId: PROJECT,
+        environmentId: ENV_PROD,
+        vars: [
+          { key: 'APP_URL', isSecret: false, value: 'https://restored.test' },
+          { key: 'API_TOKEN', isSecret: true, value: '[REDACTED]' },
+        ],
+      }),
+    );
+    const cipher = enc(plain, KEY);
+    await t.adapters.backupEngine.upload({ name: configArt.locationRef.replace('sim://offsite/', ''), bytes: cipher });
+    const { sha256: hash } = await import('../src/modules/platform/platform.crypto.js');
+    configArt.checksum = hash(cipher);
+
+    const upserts = [];
+    t.prisma.projectEnvVar = {
+      upsert: vi.fn(async ({ where, create, update }) => {
+        upserts.push({ where, create, update });
+        return { id: U(88), ...create };
+      }),
+    };
+
+    const r = await t.restores.request(req(t, { artifactId: configArt.id, mode: 'inplace' }), OWNER);
+    await approve(t, r.approval.id);
+    const done = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER);
+    expect(done.panelConfig).toBe(true);
+    expect(done.simulated).toBe(false);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0].where.environmentId_key.key).toBe('APP_URL');
+    expect(t.adapters.calls.filter((c) => c.name === 'backup.restore')).toHaveLength(0);
+  });
+});
+
 describe('restores: live SSH in-place', () => {
   it('Owner in-place db restore uses SSH when managed login exists', async () => {
     const t = await setup([], { liveDb: true });

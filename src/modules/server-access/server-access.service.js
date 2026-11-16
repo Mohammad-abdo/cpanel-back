@@ -53,6 +53,21 @@ export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 /** Live SQL dump/restore transfer cap (panel download/upload via SSH). */
 export const MAX_DB_DUMP_BYTES = 80 * 1024 * 1024;
+/** Project tree archive for backup kind `uploads` (same cap as SQL dumps). */
+export const MAX_ARCHIVE_BYTES = MAX_DB_DUMP_BYTES;
+/** Directories skipped when packing a project tree for uploads backups. */
+export const ARCHIVE_EXCLUDES = Object.freeze([
+  'node_modules',
+  'vendor',
+  '.git',
+  '.next',
+  'dist',
+  'build',
+  '__pycache__',
+  '.cache',
+  '.npm',
+  'coverage',
+]);
 export const MAX_RECURSIVE_DELETE = 5000;
 export const TICKET_TTL_MS = 30_000;
 export const SERVICE_NAME = /^[A-Za-z0-9@._-]{1,100}$/;
@@ -990,6 +1005,73 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         } catch (err) {
           if (err instanceof AppError) throw err;
           throw new AppError(502, 'DB_MANAGE_FAILED', err?.message || 'Database management failed');
+        } finally {
+          try {
+            client.end();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+    },
+
+    /**
+     * Pack a project directory over SSH into a .tar.gz (excludes node_modules/vendor/.git/…).
+     * Owner / SYSTEM_ACTOR only. Used by backup kind `uploads`.
+     */
+    async archiveTree(serverId, { path }, actor) {
+      requireOwner(actor);
+      if (!assertSafeSitePath(path)) throw new AppError(400, 'PATH_INVALID', 'Invalid project path');
+      const stamp = now().toISOString().replace(/[:.]/g, '-');
+      const filename = `uploads-${stamp}.tar.gz`;
+      const remotePath = `/tmp/nt-arch-${randomBytes(8).toString('hex')}.tgz`;
+      const excludes = ARCHIVE_EXCLUDES.map((e) => `--exclude='${e}'`).join(' ');
+      // path is assertSafeSitePath-checked (no spaces/metacharacters beyond the allowlist).
+      const cmd = [
+        `test -d '${path}' || { echo __NT_ERR__not_a_directory >&2; exit 2; }`,
+        `tar -C '${path}' ${excludes} -czf '${remotePath}' . 2>/tmp/nt-tar-err.$$; ec=$?`,
+        `if [ "$ec" -ne 0 ]; then cat /tmp/nt-tar-err.$$ 2>/dev/null | sed 's/^/__NT_ERR__/'; rm -f '${remotePath}' /tmp/nt-tar-err.$$; exit "$ec"; fi`,
+        `rm -f /tmp/nt-tar-err.$$`,
+      ].join('; ');
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execCommand(client, cmd, { maxBytes: 8 * 1024, timeoutMs: 300_000 });
+          if (res.timedOut) throw new AppError(504, 'ARCHIVE_TIMEOUT', 'Project archive timed out');
+          if (res.code !== 0) {
+            const hint = String(res.stderr || '')
+              .replace(/__NT_ERR__/g, '')
+              .trim()
+              .slice(0, 280);
+            throw new AppError(502, 'ARCHIVE_FAILED', hint ? `Archive failed: ${hint}` : 'Archive failed on the remote host');
+          }
+          const sftp = await openSftp(client);
+          try {
+            const st = await call((cb) => sftp.stat(remotePath, cb));
+            if (!st.size) throw new AppError(502, 'ARCHIVE_EMPTY', 'Archive file was empty');
+            if (st.size > MAX_ARCHIVE_BYTES) {
+              throw new AppError(
+                413,
+                'ARCHIVE_TOO_LARGE',
+                `Archive is larger than ${Math.floor(MAX_ARCHIVE_BYTES / (1024 * 1024))} MB; exclude heavy dirs or use an offsite tool`,
+              );
+            }
+            const bytes = await call((cb) => sftp.readFile(remotePath, cb));
+            await audit({
+              actorId: actor.id,
+              action: 'server.archive.tree',
+              resourceId: serverId,
+              result: 'success',
+              after: { path, size: bytes.length, sha256: sha(bytes), filename, excludes: ARCHIVE_EXCLUDES },
+            });
+            return { filename, contentType: 'application/gzip', bytes, size: bytes.length, path };
+          } finally {
+            await call((cb) => sftp.unlink(remotePath, cb)).catch(() => {});
+          }
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          throw new AppError(502, 'ARCHIVE_FAILED', err?.message || 'Project archive failed');
         } finally {
           try {
             client.end();

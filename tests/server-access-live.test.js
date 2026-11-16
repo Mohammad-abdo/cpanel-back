@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { createServerAccessService, MAX_DB_DUMP_BYTES, scrubSqlPreview } from '../src/modules/server-access/server-access.service.js';
+import {
+  createServerAccessService,
+  MAX_ARCHIVE_BYTES,
+  MAX_DB_DUMP_BYTES,
+  scrubSqlPreview,
+} from '../src/modules/server-access/server-access.service.js';
+import { SYSTEM_ACTOR } from '../src/common/system-actor.js';
 import { encrypt } from '../src/modules/platform/platform.crypto.js';
 import { createFakePrisma } from './http/fake-prisma.js';
 import { createFakeSsh, liveResponder, pm2ActionOutput } from './server-access-fake-ssh.js';
@@ -124,6 +130,31 @@ describe('live DB browse and query (fake ssh)', () => {
   });
 });
 
+describe('project archiveTree (fake ssh)', () => {
+  it('packs a safe path, cleans the temp archive, and audits size', async () => {
+    const t = await setup();
+    const res = await t.svc.archiveTree(t.serverId, { path: '/var/www/shop' }, OWNER);
+    expect(res.bytes.toString()).toContain('fake-tar-gz');
+    expect(res.filename).toMatch(/^uploads-.*\.tar\.gz$/);
+    expect([...t.ssh.files.keys()].filter((k) => k.startsWith('/tmp/nt-arch-'))).toEqual([]);
+    const ev = audits(t).find((e) => e.action === 'server.archive.tree');
+    expect(ev.after).toMatchObject({ path: '/var/www/shop', size: res.size });
+  });
+  it('allows SYSTEM_ACTOR and rejects unsafe paths / non-owners', async () => {
+    const t = await setup();
+    await expect(t.svc.archiveTree(t.serverId, { path: '/var/www/shop' }, SYSTEM_ACTOR)).resolves.toBeTruthy();
+    await expect(t.svc.archiveTree(t.serverId, { path: '../etc/passwd' }, OWNER)).rejects.toMatchObject({ code: 'PATH_INVALID' });
+    await expect(t.svc.archiveTree(t.serverId, { path: '/var/www/shop' }, DEV)).rejects.toMatchObject({ status: 403 });
+  });
+  it('enforces the archive size cap', async () => {
+    const t = await setup({ archiveFile: { size: MAX_ARCHIVE_BYTES + 1, data: Buffer.alloc(0) } });
+    await expect(t.svc.archiveTree(t.serverId, { path: '/var/www/shop' }, OWNER)).rejects.toMatchObject({
+      status: 413,
+      code: 'ARCHIVE_TOO_LARGE',
+    });
+  });
+});
+
 describe('live DB dump (fake ssh)', () => {
   it('dumps over SFTP, cleans the temp file, audits size and hash', async () => {
     const t = await setup();
@@ -142,7 +173,6 @@ describe('live DB dump (fake ssh)', () => {
     await expect(t.svc.dbDump(t.serverId, { engine: 'mysql', db: 'shop_db', auth: AUTH }, DEV)).rejects.toMatchObject({ status: 403 });
   });
   it('allows SYSTEM_ACTOR for scheduled backup dumps (Owner-equivalent, no user id)', async () => {
-    const { SYSTEM_ACTOR } = await import('../src/common/system-actor.js');
     const t = await setup();
     const res = await t.svc.dbDump(t.serverId, { engine: 'mysql', db: 'shop_db', auth: AUTH }, SYSTEM_ACTOR);
     expect(res.bytes.toString()).toContain('CREATE TABLE');

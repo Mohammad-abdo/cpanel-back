@@ -164,9 +164,38 @@ export function createBackupsService({
     };
   }
 
+  /**
+   * Uploads / project tree: tar.gz over SSH from runtime.metaJson.discoveredPath when the actor
+   * is Owner or SYSTEM_ACTOR. Heavy dirs (node_modules, .git, …) are excluded. Falls back to simulated.
+   */
+  async function dumpUploads(policy, actor) {
+    const canLive = isSystemActor(actor) || actor?.isOwner;
+    if (canLive && serverAccessService?.archiveTree && prisma.project?.findUnique) {
+      const project = await prisma.project.findUnique({
+        where: { id: policy.projectId },
+        include: { runtime: true },
+      });
+      const path = project?.runtime?.metaJson?.discoveredPath;
+      if (project?.serverId && typeof path === 'string' && path.length > 1) {
+        const result = await serverAccessService.archiveTree(project.serverId, { path }, actor);
+        const bytes = Buffer.isBuffer(result.bytes) ? result.bytes : Buffer.from(result.bytes ?? '');
+        if (!bytes.length) throw new AppError(502, 'ARCHIVE_EMPTY', 'Project archive was empty');
+        return {
+          bytes,
+          consistent: true,
+          method: 'tar-gz-excludes',
+          simulated: false,
+          source: 'ssh-archive',
+        };
+      }
+    }
+    return adapters.backupEngine.dump({ kind: 'uploads', ref: policy.projectId });
+  }
+
   async function dumpPart(kind, policy, actor) {
     if (kind === 'db') return dumpDb(policy, actor);
     if (kind === 'config') return dumpConfig(policy);
+    if (kind === 'uploads') return dumpUploads(policy, actor);
     return adapters.backupEngine.dump({ kind, ref: policy.projectId });
   }
 
@@ -307,7 +336,7 @@ export function createBackupsService({
           after: { runId: run.id, kinds: input.kinds, trigger: input.trigger, liveDb: usedLiveDb },
         });
         // simulated=false only when every requested part came from a non-simulated source; live DB + panel config still marks hybrid.
-        const hybrid = parts.some((p) => p.source === 'ssh-live' || p.source === 'panel-env');
+        const hybrid = parts.some((p) => p.source === 'ssh-live' || p.source === 'panel-env' || p.source === 'ssh-archive');
         return {
           run,
           artifacts: saved.map((s) => ({ id: s.id, kind: s.kind, checksum: s.checksum })),

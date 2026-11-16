@@ -29,7 +29,7 @@ const grant = (userId, key, environmentId) => ({
   expiresAt: null,
 });
 
-function setup({ runner, healthChecker, grants = [], health = [] } = {}) {
+function setup({ runner, healthChecker, grants = [], health = [], backups = null, backupPolicies = [] } = {}) {
   const prisma = fakePrisma({
     server: [{ id: SERVER, alias: 's1', archivedAt: null }],
     project: [
@@ -46,6 +46,7 @@ function setup({ runner, healthChecker, grants = [], health = [] } = {}) {
     ],
     resourceGrant: grants,
     healthCheck: health,
+    backupPolicy: backupPolicies,
   });
   const base = prisma.operationJob.findFirst;
   prisma.operationJob.findFirst = async (args) => {
@@ -63,6 +64,7 @@ function setup({ runner, healthChecker, grants = [], health = [] } = {}) {
     runner: runner ?? createSimulatedRunner(),
     healthChecker: healthChecker ?? createSimulatedHealthChecker(),
     healthTimeoutMs: 20,
+    backups,
   });
   const operations = createOperationsService({ prisma, auditService, executor });
   const projects = createProjectsService({ prisma, auditService, operationsService: operations });
@@ -171,6 +173,46 @@ describe('TASK-018/019 deployments, health checks and rollback', () => {
     expect(stepNames(ctx.prisma)).toEqual(['Preparing', 'Building', 'Deploying', 'Health Check']);
     expect(ctx.prisma.deploymentStep.rows.every((s) => s.startedAt && s.finishedAt)).toBe(true);
     expect(ctx.prisma.deploymentStep.rows.at(-1).status).toBe('SKIPPED'); // no health checks configured
+  });
+
+  it('pre-deploy backup runs when a policy exists and blocks deploy when it fails', async () => {
+    const runBackup = vi.fn(async () => ({ run: { id: 'br1' }, simulated: true, liveDb: false }));
+    const ctx = setup({
+      backups: { runBackup },
+      backupPolicies: [{ id: 'bp1', projectId: P1, environmentId: STG, archivedAt: null, createdAt: new Date() }],
+    });
+    const { deployment } = await deploy(ctx, STG, 'deploy-key-pre1');
+    const out = await ctx.deployments.run(deployment.id, OWNER);
+    expect(out.deployment.status).toBe('Success');
+    expect(stepNames(ctx.prisma)[0]).toBe('Pre-deploy Backup');
+    expect(runBackup).toHaveBeenCalledWith(
+      'bp1',
+      expect.objectContaining({ environmentId: STG, trigger: 'pre-deploy', kinds: ['db', 'config'] }),
+      expect.objectContaining({ system: true }),
+    );
+
+    const failingBackup = vi.fn(async () => {
+      throw Object.assign(new Error('disk full'), { code: 'BACKUP_FAILED' });
+    });
+    const bad = setup({
+      backups: { runBackup: failingBackup },
+      backupPolicies: [{ id: 'bp2', projectId: P1, environmentId: STG, archivedAt: null, createdAt: new Date() }],
+    });
+    const d2 = await deploy(bad, STG, 'deploy-key-pre2');
+    const failed = await bad.deployments.run(d2.deployment.id, OWNER);
+    expect(failed.deployment.status).toBe('Failed');
+    expect(stepNames(bad.prisma)).toEqual(['Pre-deploy Backup']);
+    expect(stepNames(bad.prisma)).not.toContain('Building');
+  });
+
+  it('pre-deploy backup is skipped when no policy exists for the environment', async () => {
+    const runBackup = vi.fn();
+    const ctx = setup({ backups: { runBackup }, backupPolicies: [] });
+    const { deployment } = await deploy(ctx, STG, 'deploy-key-pre3');
+    await ctx.deployments.run(deployment.id, OWNER);
+    expect(stepNames(ctx.prisma)[0]).toBe('Pre-deploy Backup');
+    expect(ctx.prisma.deploymentStep.rows[0].status).toBe('SKIPPED');
+    expect(runBackup).not.toHaveBeenCalled();
   });
 
   it('build failure ends Failed without rollback', async () => {

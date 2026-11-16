@@ -328,4 +328,39 @@ describe('backups: live SSH dump hybrid', () => {
     expect(t.dbDump).not.toHaveBeenCalled();
     expect(t.adapters.calls.some((c) => c.name === 'backup.dump' && c.arg?.kind === 'db')).toBe(true);
   });
+
+  it('uploads kind uses SSH archiveTree when discoveredPath exists', async () => {
+    const extra = backupPrisma();
+    const ctx = makeCtx({ now: () => NOW });
+    Object.assign(ctx.prisma, extra, {
+      managedDatabase: { findMany: vi.fn(async () => []) },
+      project: {
+        findUnique: vi.fn(async () => ({
+          id: PROJECT,
+          serverId: SERVER,
+          runtime: { metaJson: { discoveredPath: '/var/www/shop' } },
+        })),
+      },
+      projectEnvVar: { findMany: vi.fn(async () => []) },
+    });
+    const archiveTree = vi.fn(async () => ({ bytes: Buffer.from('PK-fake-archive'), size: 16 }));
+    const svc = createBackupsService({
+      ...ctx,
+      encryptionKey: () => KEY,
+      credentialKey: () => KEY,
+      serverAccessService: { archiveTree },
+    });
+    const res = await svc.runBackup(POLICY, { environmentId: ENV_PROD, kinds: ['uploads'], trigger: 'manual' }, OWNER);
+    expect(res.simulated).toBe(false);
+    expect(archiveTree).toHaveBeenCalledWith(SERVER, { path: '/var/www/shop' }, OWNER);
+    const man = JSON.parse(
+      decrypt(
+        await ctx.adapters.backupEngine.download({
+          locationRef: [...extra.artStore.values()].find((a) => a.kind === 'manifest').locationRef,
+        }),
+        KEY,
+      ),
+    );
+    expect(man.entries.find((e) => e.kind === 'uploads')).toMatchObject({ method: 'tar-gz-excludes', source: 'ssh-archive' });
+  });
 });

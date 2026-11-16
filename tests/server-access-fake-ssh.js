@@ -125,6 +125,11 @@ export function liveResponder(over = {}) {
       if (out) files.set(out, over.dumpFile ?? { data: Buffer.from('-- dump\nCREATE TABLE t (id int);\n') });
       return {};
     }
+    if (/\btar\b/.test(command) && /nt-arch-/.test(command)) {
+      const out = /\/tmp\/nt-arch-[0-9a-f]+\.tgz/.exec(command)?.[0];
+      if (out) files.set(out, over.archiveFile ?? { data: Buffer.from('fake-tar-gz-bytes') });
+      return {};
+    }
     if (/mysql|psql/.test(command)) {
       if (/SHOW DATABASES/i.test(command)) return { stdout: 'Database\nshop_db\nmysql\n' };
       return { stdout: 'id\tname\n1\tAda\n2\tNULL\n' };

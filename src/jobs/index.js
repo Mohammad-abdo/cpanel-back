@@ -18,13 +18,18 @@ import { buildJobs, parseJobConfig } from './jobs.js';
 export function createDefaultServices() {
   const deps = getDeps();
   const auditService = createAuditService({ prisma });
+  const backups = createBackupsService({ ...deps, serverAccessService });
   return {
     prisma,
-    operations: createOperationsService({ prisma, auditService, executor: createDeploymentExecutor({ prisma }) }),
+    operations: createOperationsService({
+      prisma,
+      auditService,
+      executor: createDeploymentExecutor({ prisma, backups }),
+    }),
     alerts: createAlertsService({ prisma, auditService, store: logsService.store }),
     reports: createReportsService({ prisma, auditService }),
     certificates: createCertificatesService(deps),
-    backups: createBackupsService({ ...deps, serverAccessService }),
+    backups,
     security: createSecurityService({ ...deps, incidents: createIncidentsService(deps) }),
     accessReviews: createAccessReviewsService(deps),
     auditService,

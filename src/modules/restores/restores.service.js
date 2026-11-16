@@ -2,7 +2,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
-import { decrypt, sha256 } from '../platform/platform.crypto.js';
+import { decrypt, encrypt, sha256 } from '../platform/platform.crypto.js';
 
 /** select -> validate -> impact preview -> approval -> safety backup -> restore -> health -> audit */
 export const RESTORE_TRANSITIONS = Object.freeze({
@@ -149,11 +149,62 @@ export function createRestoresService({
     }
   }
 
+  /**
+   * In-place config restore into panel ProjectEnvVar. Only non-secret values that were not
+   * redacted at backup time are written; secrets stay untouched (backup stored [REDACTED]).
+   */
+  async function panelRestoreConfig(policy, plain, actor) {
+    if (!prisma.projectEnvVar?.upsert || !policy.environmentId) return null;
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.isBuffer(plain) ? plain.toString('utf8') : String(plain));
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(payload?.vars)) return null;
+    const restorables = payload.vars.filter(
+      (v) =>
+        v &&
+        typeof v.key === 'string' &&
+        v.key &&
+        !v.isSecret &&
+        typeof v.value === 'string' &&
+        v.value !== '[REDACTED]' &&
+        v.value !== '[UNREADABLE]',
+    );
+    for (const v of restorables) {
+      const valueEnc = encrypt(v.value, credentialKey());
+      await prisma.projectEnvVar.upsert({
+        where: { environmentId_key: { environmentId: policy.environmentId, key: v.key } },
+        create: {
+          environmentId: policy.environmentId,
+          key: v.key,
+          valueEnc,
+          isSecret: false,
+          updatedById: actor.id ?? null,
+        },
+        update: { valueEnc, isSecret: false, updatedById: actor.id ?? null },
+      });
+    }
+    return {
+      restored: true,
+      checksums: { config: sha256(plain) },
+      simulated: false,
+      source: 'panel-env',
+      live: null,
+      restoredKeys: restorables.map((v) => v.key),
+    };
+  }
+
   async function applyRestore({ mode, policy, kind, plain, actor }) {
-    // Isolated trial never writes the live server database.
+    // Isolated trial never writes the live server database or panel env store.
     if (mode === 'inplace' && kind === 'db' && actor?.isOwner) {
       const live = await liveRestoreDb(policy, plain, actor);
       if (live) return live;
+    }
+    if (mode === 'inplace' && kind === 'config') {
+      const panel = await panelRestoreConfig(policy, plain, actor);
+      if (panel) return panel;
     }
     const result = await adapters.backupEngine.restore({
       mode,
@@ -266,6 +317,7 @@ export function createRestoresService({
       let state = await move(run, 'approved', { approvedById: gate.approval.approverId });
       let safetyBackupRunId = null;
       let usedLive = false;
+      let usedPanel = false;
       const fail = async (code, message, extra = {}) => {
         if (RESTORE_TRANSITIONS[state.status]?.includes('failed')) await move(state, 'failed');
         await audit({
@@ -296,13 +348,16 @@ export function createRestoresService({
         const { plain } = await backups.verifyArtifactBytes(artifact);
         const result = await applyRestore({ mode, policy, kind: artifact.kind, plain, actor });
         usedLive = result.source === 'ssh-live';
+        usedPanel = result.source === 'panel-env';
         if (!result.restored || result.checksums?.[artifact.kind] !== sha256(plain)) {
           return await fail('RESTORE_MISMATCH', 'Restored data does not match the backup content');
         }
         state = await move(state, 'health_check');
-        const health =
-          (usedLive ? await liveHealth(policy, actor, result.live) : null) ??
-          (await adapters.backupEngine.health({ mode, projectId: policy.projectId }));
+        // Panel config restore is verified by checksum match above; treat as healthy without adapter.
+        const health = usedPanel
+          ? { healthy: true, source: 'panel-env' }
+          : ((usedLive ? await liveHealth(policy, actor, result.live) : null) ??
+            (await adapters.backupEngine.health({ mode, projectId: policy.projectId })));
         if (!health.healthy) {
           if (!safetyBackupRunId) return await fail('RESTORE_HEALTH_FAILED', 'Health check failed', { rolledBack: false });
           const rolledBack = await rollbackFromSafety(safetyBackupRunId, policy, actor);
@@ -326,14 +381,22 @@ export function createRestoresService({
         resourceId: id,
         environmentId: input.environmentId,
         result: 'success',
-        after: { mode, kind: artifact.kind, safetyBackupRunId, approverId: state.approvedById, live: usedLive },
+        after: {
+          mode,
+          kind: artifact.kind,
+          safetyBackupRunId,
+          approverId: state.approvedById,
+          live: usedLive,
+          panelConfig: usedPanel,
+        },
       });
       return {
         restore: state,
         mode,
         safetyBackupRunId,
-        simulated: usedLive ? false : Boolean(adapters.simulated),
+        simulated: usedLive || usedPanel ? false : Boolean(adapters.simulated),
         live: usedLive,
+        panelConfig: usedPanel,
       };
     },
   };

@@ -1,4 +1,5 @@
 import { AppError } from '../../common/errors/app-error.js';
+import { SYSTEM_ACTOR } from '../../common/system-actor.js';
 import { redact } from '../audit/audit.service.js';
 import { createSimulatedExecutor } from '../operations/operations.executor.js';
 import { computeSharedImpact } from '../projects/projects.service.js';
@@ -39,6 +40,8 @@ export function createDeploymentExecutor({
   now = () => new Date(),
   healthTimeoutMs = 30_000,
   fallback = createSimulatedExecutor(),
+  /** When set, runs an optional pre-deploy backup for the target env before Preparing. */
+  backups = null,
 }) {
   async function setStatus(deployment, status) {
     deployment.status = status;
@@ -130,6 +133,49 @@ export function createDeploymentExecutor({
   }
 
   async function runDeployment(deployment, job) {
+    // Optional pre-deployment backup (required.md §8). Skipped when no policy exists for the env.
+    if (backups?.runBackup) {
+      await setStatus(deployment, 'Preparing');
+      const pre = await step(deployment, job, 'Pre-deploy Backup', async () => {
+        const policy = await prisma.backupPolicy.findFirst({
+          where: {
+            projectId: deployment.projectId,
+            environmentId: deployment.environmentId,
+            archivedAt: null,
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (!policy) {
+          return { ok: true, skipped: true, detail: { reason: 'no backup policy for environment' } };
+        }
+        try {
+          const res = await backups.runBackup(
+            policy.id,
+            { environmentId: deployment.environmentId, kinds: ['db', 'config'], trigger: 'pre-deploy' },
+            SYSTEM_ACTOR,
+          );
+          return {
+            ok: true,
+            detail: {
+              runId: res.run?.id ?? null,
+              simulated: Boolean(res.simulated),
+              liveDb: Boolean(res.liveDb),
+              trigger: 'pre-deploy',
+            },
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            detail: { error: String(err?.message ?? err).slice(0, 300), code: err?.code ?? 'BACKUP_FAILED' },
+          };
+        }
+      });
+      if (!pre.ok) {
+        await setStatus(deployment, 'Failed');
+        return { result: 'FAILED', detail: { failedStep: 'Pre-deploy Backup', status: 'Failed' } };
+      }
+    }
+
     const phases = [
       ['Preparing', () => runner.prepare({ deployment, job })],
       ['Building', () => runner.build({ deployment, job })],
