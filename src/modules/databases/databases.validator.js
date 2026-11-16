@@ -52,3 +52,32 @@ export const createInstanceBodySchema = z
     ...approvalFields,
   })
   .strict();
+
+export const instanceIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
+
+export const instanceLoginBodySchema = z
+  .object({
+    username: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9_./@-]+$/, 'Invalid username'),
+    password: z.string().min(1).max(256),
+  })
+  .strict();
+
+export const instanceLiveTablesQuerySchema = z
+  .object({ db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/) })
+  .strict();
+
+export const instanceLiveTableQuerySchema = z
+  .object({
+    db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    table: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    offset: z.coerce.number().int().min(0).max(100000).optional(),
+  })
+  .strict();
+
+export const instanceLiveQueryBodySchema = z
+  .object({
+    sql: z.string().min(1).max(20000),
+    db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
+  })
+  .strict();

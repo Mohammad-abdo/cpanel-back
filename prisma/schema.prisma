@@ -573,6 +573,9 @@ model DatabaseInstance {
   port      Int?
   /// Reference to a secret manager entry only; never a secret value.
   adminSecretRef String?
+  /// Optional admin login for live SSH browse. Password is AES-GCM in adminSecretEnc — never returned by the API.
+  adminUsername  String?
+  adminSecretEnc Bytes?   @db.Blob
   /// Discovered schema names and scan metadata. Never credentials.
   metaJson  Json?
   createdAt DateTime @default(now())

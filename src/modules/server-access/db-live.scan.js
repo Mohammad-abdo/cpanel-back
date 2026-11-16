@@ -6,6 +6,7 @@
 export const SAFE_ENGINE = new Set(['mysql', 'postgres']);
 export const SAFE_IDENT = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const SAFE_DB_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+export const SAFE_DB_USER = /^[A-Za-z0-9_./@-]{1,64}$/;
 
 const SYSTEM_MYSQL = new Set(['information_schema', 'mysql', 'performance_schema', 'sys']);
 const SYSTEM_PG = new Set(['template0', 'template1', 'postgres']);
@@ -24,6 +25,13 @@ export function assertSafeDbName(name) {
   return name;
 }
 
+export function assertSafeDbUser(name) {
+  if (typeof name !== 'string' || !SAFE_DB_USER.test(name)) {
+    throw Object.assign(new Error('Invalid database username'), { code: 'DB_USER_INVALID' });
+  }
+  return name;
+}
+
 function shQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
@@ -37,14 +45,30 @@ function pgIdent(name) {
 }
 
 /**
- * MySQL/MariaDB CLI with several auth fallbacks.
- * Copies debian.cnf via sudo when the SSH user cannot read it, then tries socket sudo.
+ * MySQL/MariaDB CLI. When auth is provided, uses a temp defaults file (password never
+ * appears as a mysql argv flag). Otherwise falls back to sudo/debian.cnf probes.
  */
-export function mysqlCmd(sql, db = null) {
+export function mysqlCmd(sql, db = null, auth = null) {
   const q = shQuote(sql);
   const dbArg = db ? ` ${shQuote(assertSafeDbName(db))}` : '';
   const flags = `--batch --raw --default-character-set=utf8mb4${dbArg} -e ${q}`;
-  // One bash -c script; capture EC after each attempt (if tests reset $?).
+  if (auth?.username) {
+    const user = assertSafeDbUser(auth.username);
+    const pass = String(auth.password ?? '');
+    return [
+      'ERRFILE=$(mktemp)',
+      'CFG=$(mktemp)',
+      'chmod 600 "$CFG"',
+      `printf '%s\\n' '[client]' 'user=${user}' >"$CFG"`,
+      `printf 'password=%s\\n' ${shQuote(pass)} >>"$CFG"`,
+      `OUT=$(mysql --defaults-extra-file="$CFG" ${flags} 2>>"$ERRFILE"); EC=$?`,
+      'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then OUT=""; fi',
+      'printf "%s" "$OUT"',
+      'if [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+      'rm -f "$ERRFILE" "$CFG"',
+      '[ -n "$OUT" ]',
+    ].join('; ');
+  }
   return [
     'ERRFILE=$(mktemp)',
     'CFG=$(mktemp)',
@@ -64,8 +88,20 @@ export function mysqlCmd(sql, db = null) {
   ].join('; ');
 }
 
-export function postgresCmd(sql) {
+export function postgresCmd(sql, auth = null) {
   const q = shQuote(sql);
+  if (auth?.username) {
+    const user = assertSafeDbUser(auth.username);
+    const pass = String(auth.password ?? '');
+    return [
+      `export PGPASSWORD=${shQuote(pass)}`,
+      `OUT=$(psql -U ${shQuote(user)} -v ON_ERROR_STOP=1 -P pager=off -F $'\\t' -A -c ${q} 2>/tmp/nt-pg-err.$$)`,
+      'EC=$?',
+      'unset PGPASSWORD',
+      'printf "%s" "$OUT"',
+      'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" </tmp/nt-pg-err.$$ | cut -c1-400)" >&2; rm -f /tmp/nt-pg-err.$$; false; else rm -f /tmp/nt-pg-err.$$; true; fi',
+    ].join('; ');
+  }
   return (
     `(sudo -n -u postgres psql -v ON_ERROR_STOP=1 -P pager=off -F $'\\t' -A -c ${q} 2>/dev/null` +
     ` || psql -U postgres -v ON_ERROR_STOP=1 -P pager=off -F $'\\t' -A -c ${q} 2>/dev/null` +
@@ -132,10 +168,22 @@ ORDER BY 1`;
 }
 
 /** For postgres, connect to the target database. */
-export function postgresCmdInDb(db, sql) {
+export function postgresCmdInDb(db, sql, auth = null) {
   assertSafeDbName(db);
   const q = shQuote(sql);
   const dbq = shQuote(db);
+  if (auth?.username) {
+    const user = assertSafeDbUser(auth.username);
+    const pass = String(auth.password ?? '');
+    return [
+      `export PGPASSWORD=${shQuote(pass)}`,
+      `OUT=$(psql -U ${shQuote(user)} -d ${dbq} -v ON_ERROR_STOP=1 -P pager=off -F $'\\t' -A -c ${q} 2>/tmp/nt-pg-err.$$)`,
+      'EC=$?',
+      'unset PGPASSWORD',
+      'printf "%s" "$OUT"',
+      'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" </tmp/nt-pg-err.$$ | cut -c1-400)" >&2; rm -f /tmp/nt-pg-err.$$; false; else rm -f /tmp/nt-pg-err.$$; true; fi',
+    ].join('; ');
+  }
   return (
     `(sudo -n -u postgres psql -d ${dbq} -v ON_ERROR_STOP=1 -P pager=off -F $'\\t' -A -c ${q} 2>/dev/null` +
     ` || psql -U postgres -d ${dbq} -v ON_ERROR_STOP=1 -P pager=off -F $'\\t' -A -c ${q} 2>/dev/null)`

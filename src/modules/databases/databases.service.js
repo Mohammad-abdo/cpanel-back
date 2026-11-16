@@ -3,12 +3,32 @@ import { AppError } from '../../common/errors/app-error.js';
 import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
+import { decrypt, encrypt } from '../platform/platform.crypto.js';
 
 const RESERVED = new Set(['mysql', 'sys', 'information_schema', 'performance_schema', 'root', 'admin']);
 const SAFETY_BACKUP_MAX_AGE_MS = 24 * 3600 * 1000;
 export const GRANTS = { read: ['SELECT'], readwrite: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'] };
 
-export function createDatabasesService({ prisma, now = () => new Date(), auditService = null, rbac = null, platform = null, adapters = null }) {
+function presentInstance(row) {
+  if (!row) return row;
+  const { adminSecretEnc, ...rest } = row;
+  return {
+    ...rest,
+    hasAdminLogin: Boolean(adminSecretEnc && rest.adminUsername),
+    adminSecretEnc: undefined,
+  };
+}
+
+export function createDatabasesService({
+  prisma,
+  now = () => new Date(),
+  auditService = null,
+  rbac = null,
+  platform = null,
+  adapters = null,
+  serverAccessService = null,
+  credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
+}) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
 
   async function authorize(actor, projectId, environmentId) {
@@ -20,16 +40,98 @@ export function createDatabasesService({ prisma, now = () => new Date(), auditSe
 
   const scope = createScope({ prisma, now });
 
+  function requireOwner(actor) {
+    if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+    if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can manage database logins');
+  }
+
   async function loadDb(id) {
     const db = await prisma.managedDatabase.findUnique({ where: { id }, include: { instance: true, users: true } });
     if (!db) throw new AppError(404, 'DATABASE_NOT_FOUND', 'Database not found');
     return db;
   }
 
+  async function loadInstance(id, actor) {
+    const row = await prisma.databaseInstance.findUnique({ where: { id } });
+    if (!row) throw new AppError(404, 'INSTANCE_NOT_FOUND', 'Database instance not found');
+    if (row.serverId) await scope.requireServer(actor, row.serverId, 'SERVER_NOT_FOUND', 'Server not found');
+    return row;
+  }
+
+  function instanceAuth(row) {
+    if (!row.adminUsername || !row.adminSecretEnc) return null;
+    return {
+      username: row.adminUsername,
+      password: decrypt(Buffer.from(row.adminSecretEnc), credentialKey()).toString('utf8'),
+    };
+  }
+
   return {
     async listInstances(actor) {
       const serverId = await scope.serverClause(actor);
-      return prisma.databaseInstance.findMany({ where: serverId ? { serverId } : {}, orderBy: { name: 'asc' } });
+      const rows = await prisma.databaseInstance.findMany({ where: serverId ? { serverId } : {}, orderBy: { name: 'asc' } });
+      return rows.map(presentInstance);
+    },
+
+    async getInstance(id, actor) {
+      return presentInstance(await loadInstance(id, actor));
+    },
+
+    /** Owner MFA: store encrypted admin password for live SSH browse. Password is never returned. */
+    async setInstanceLogin(id, { username, password }, actor) {
+      requireOwner(actor);
+      const row = await loadInstance(id, actor);
+      if (row.engine !== 'mysql' && row.engine !== 'postgres') {
+        throw new AppError(422, 'ENGINE_UNSUPPORTED', 'Login is only supported for MySQL and Postgres');
+      }
+      const secretEnc = encrypt(password, credentialKey());
+      const updated = await prisma.databaseInstance.update({
+        where: { id },
+        data: { adminUsername: username, adminSecretEnc: secretEnc },
+      });
+      await audit({
+        actorId: actor.id,
+        action: 'db.instance.login.set',
+        resourceType: 'database_instance',
+        resourceId: id,
+        result: 'success',
+        after: { username, engine: row.engine },
+      });
+      return presentInstance(updated);
+    },
+
+    async clearInstanceLogin(id, actor) {
+      requireOwner(actor);
+      await loadInstance(id, actor);
+      const updated = await prisma.databaseInstance.update({
+        where: { id },
+        data: { adminUsername: null, adminSecretEnc: null },
+      });
+      await audit({
+        actorId: actor.id,
+        action: 'db.instance.login.clear',
+        resourceType: 'database_instance',
+        resourceId: id,
+        result: 'success',
+      });
+      return presentInstance(updated);
+    },
+
+    /** Live browse via SSH using saved instance login when present. */
+    async liveBrowse(id, params, actor) {
+      requireOwner(actor);
+      if (!serverAccessService?.dbBrowse) throw new AppError(500, 'LIVE_UNAVAILABLE', 'Live database browse is not wired');
+      const row = await loadInstance(id, actor);
+      if (!row.serverId) throw new AppError(409, 'INSTANCE_NO_SERVER', 'This instance is not linked to a server');
+      if (row.engine !== 'mysql' && row.engine !== 'postgres') {
+        throw new AppError(422, 'ENGINE_UNSUPPORTED', 'Live browse supports MySQL and Postgres only');
+      }
+      const auth = instanceAuth(row);
+      return serverAccessService.dbBrowse(
+        row.serverId,
+        { engine: row.engine, auth, ...params },
+        actor,
+      );
     },
 
     async createInstance(input, actor) {
@@ -58,7 +160,8 @@ export function createDatabasesService({ prisma, now = () => new Date(), auditSe
         schemaPending = true;
       }
       await audit({ actorId: actor.id, action: 'db.instance.register', resourceType: 'database_instance', resourceId: row.id, result: 'success', after: { engine: input.engine, name: input.name, serverId: input.serverId ?? null, host: input.host ?? null, port: input.port ?? null, adminSecretRef: input.adminSecretRef ?? null } });
-      return schemaPending ? { ...row, schemaPending: true } : row;
+      const out = presentInstance(row);
+      return schemaPending ? { ...out, schemaPending: true } : out;
     },
 
     async list({ projectId, limit }, actor) {

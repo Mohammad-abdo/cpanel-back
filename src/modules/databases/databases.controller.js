@@ -8,8 +8,45 @@ export function createDatabasesController(svc) {
     async instances(req, res) {
       res.status(200).json({ data: await svc.listInstances(req.user) });
     },
+    async getInstance(req, res) {
+      res.status(200).json({ data: await svc.getInstance(req.validated.params.id, req.user) });
+    },
     async createInstance(req, res) {
       respond(res, await svc.createInstance(req.validated.body, req.user), 201);
+    },
+    async setInstanceLogin(req, res) {
+      res.status(200).json({ data: await svc.setInstanceLogin(req.validated.params.id, req.validated.body, req.user) });
+    },
+    async clearInstanceLogin(req, res) {
+      res.status(200).json({ data: await svc.clearInstanceLogin(req.validated.params.id, req.user) });
+    },
+    async liveSchemas(req, res) {
+      res.status(200).json({
+        data: await svc.liveBrowse(req.validated.params.id, { action: 'schemas' }, req.user),
+      });
+    },
+    async liveTables(req, res) {
+      res.status(200).json({
+        data: await svc.liveBrowse(req.validated.params.id, { action: 'tables', db: req.validated.query.db }, req.user),
+      });
+    },
+    async liveColumns(req, res) {
+      const { db, table } = req.validated.query;
+      res.status(200).json({
+        data: await svc.liveBrowse(req.validated.params.id, { action: 'columns', db, table }, req.user),
+      });
+    },
+    async liveRows(req, res) {
+      const { db, table, limit, offset } = req.validated.query;
+      res.status(200).json({
+        data: await svc.liveBrowse(req.validated.params.id, { action: 'rows', db, table, limit, offset }, req.user),
+      });
+    },
+    async liveQuery(req, res) {
+      const { sql, db } = req.validated.body;
+      res.status(200).json({
+        data: await svc.liveBrowse(req.validated.params.id, { action: 'query', sql, db }, req.user),
+      });
     },
     async create(req, res) {
       respond(res, await svc.create(req.validated.body, req.user), 201);

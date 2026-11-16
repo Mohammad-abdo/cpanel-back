@@ -466,9 +466,10 @@ export function createServerAccessService({ prisma, connector, auditService = nu
      * Live DB browse over SSH CLI (MySQL / Postgres). Owner MFA only.
      * action: schemas | tables | columns | rows | query
      */
-    async dbBrowse(serverId, { engine, action, db, table, sql, limit, offset }, actor) {
+    async dbBrowse(serverId, { engine, action, db, table, sql, limit, offset, auth = null }, actor) {
       requireOwner(actor);
       if (!SAFE_ENGINE.has(engine)) throw new AppError(422, 'DB_ENGINE_INVALID', 'Engine must be mysql or postgres');
+      const login = auth?.username ? { username: auth.username, password: auth.password ?? '' } : null;
       return withSshLock(serverId, async () => {
         const cred = await loadCredential(serverId);
         const { client } = await connectWith(cred);
@@ -492,7 +493,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
                 'DB_LIVE_FAILED',
                 hint
                   ? `Database CLI failed: ${hint}`
-                  : 'Database CLI returned no data (missing sudo/debian.cnf privileges for MySQL?)',
+                  : 'Database CLI returned no data (missing credentials or privileges?)',
               );
             }
             return stdout;
@@ -500,7 +501,9 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           const parse = (text) => (engine === 'mysql' ? parseMysqlBatch(text) : parsePsqlAligned(text));
 
           if (action === 'schemas') {
-            const text = await run(engine === 'mysql' ? mysqlCmd(listSchemasSql(engine)) : postgresCmd(listSchemasSql(engine)));
+            const text = await run(
+              engine === 'mysql' ? mysqlCmd(listSchemasSql(engine), null, login) : postgresCmd(listSchemasSql(engine), login),
+            );
             const parsed = parse(text);
             const names =
               engine === 'mysql'
@@ -517,6 +520,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
               engine,
               schemas: filterSchemaNames(engine, fallback),
               collectedAt: now().toISOString(),
+              usedLogin: Boolean(login),
             };
           }
 
@@ -524,10 +528,10 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             assertSafeDbName(db);
             const text =
               engine === 'mysql'
-                ? await run(mysqlCmd(listTablesSql(engine, db), db))
-                : await run(postgresCmdInDb(db, listTablesSql(engine, db)));
+                ? await run(mysqlCmd(listTablesSql(engine, db), db, login))
+                : await run(postgresCmdInDb(db, listTablesSql(engine, db), login));
             const { columns, rows } = parse(text);
-            return { engine, db, columns, tables: rows, collectedAt: now().toISOString() };
+            return { engine, db, columns, tables: rows, collectedAt: now().toISOString(), usedLogin: Boolean(login) };
           }
 
           if (action === 'columns') {
@@ -535,10 +539,10 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             assertSafeIdent(table, 'table');
             const text =
               engine === 'mysql'
-                ? await run(mysqlCmd(describeTableSql(engine, db, table), db))
-                : await run(postgresCmdInDb(db, describeTableSql(engine, db, table)));
+                ? await run(mysqlCmd(describeTableSql(engine, db, table), db, login))
+                : await run(postgresCmdInDb(db, describeTableSql(engine, db, table), login));
             const { columns, rows } = parse(text);
-            return { engine, db, table, columns, fields: rows, collectedAt: now().toISOString() };
+            return { engine, db, table, columns, fields: rows, collectedAt: now().toISOString(), usedLogin: Boolean(login) };
           }
 
           if (action === 'rows') {
@@ -546,8 +550,8 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             assertSafeIdent(table, 'table');
             const text =
               engine === 'mysql'
-                ? await run(mysqlCmd(selectRowsSql(engine, db, table, limit, offset), db))
-                : await run(postgresCmdInDb(db, selectRowsSql(engine, db, table, limit, offset)));
+                ? await run(mysqlCmd(selectRowsSql(engine, db, table, limit, offset), db, login))
+                : await run(postgresCmdInDb(db, selectRowsSql(engine, db, table, limit, offset), login));
             const { columns, rows } = parse(text);
             return {
               engine,
@@ -558,6 +562,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
               limit: Math.min(Math.max(Number(limit) || 50, 1), 200),
               offset: Math.min(Math.max(Number(offset) || 0, 0), 100000),
               collectedAt: now().toISOString(),
+              usedLogin: Boolean(login),
             };
           }
 
@@ -572,15 +577,15 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             if (db) assertSafeDbName(db);
             const text =
               engine === 'mysql'
-                ? await run(mysqlCmd(sql, db || null))
-                : await run(db ? postgresCmdInDb(db, sql) : postgresCmd(sql));
+                ? await run(mysqlCmd(sql, db || null, login))
+                : await run(db ? postgresCmdInDb(db, sql, login) : postgresCmd(sql, login));
             const { columns, rows } = parse(text);
             await audit({
               actorId: actor.id,
               action: mutating ? 'server.db.query.write' : 'server.db.query.read',
               resourceId: serverId,
               result: 'success',
-              after: { engine, db: db || null, mutating, sqlPreview: sql.slice(0, 200) },
+              after: { engine, db: db || null, mutating, sqlPreview: sql.slice(0, 200), usedLogin: Boolean(login) },
             });
             return {
               engine,
@@ -590,6 +595,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
               rows,
               rowCount: rows.length,
               collectedAt: now().toISOString(),
+              usedLogin: Boolean(login),
             };
           }
 
