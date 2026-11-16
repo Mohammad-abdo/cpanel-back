@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch --env-file-if-exists=.env src/server.js",
+    "dev:webmail": "node --watch --env-file-if-exists=.env src/webmail-server.js",
     "start": "node --env-file-if-exists=.env src/server.js",
+    "start:webmail": "node --env-file-if-exists=.env src/webmail-server.js",
     "test": "vitest run",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
@@ -27,6 +29,8 @@
     "@prisma/client": "^6.5.0",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
+    "imapflow": "^2.12.1",
+    "nodemailer": "^10.6.0",
     "ssh2": "^1.17.0",
     "ws": "^8.23.0",
     "zod": "^4.1.0"

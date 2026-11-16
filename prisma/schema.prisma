@@ -1191,11 +1191,32 @@ model MailboxAccount {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  domain Domain               @relation(fields: [domainId], references: [id], onDelete: Cascade)
-  events MailboxAuditEvent[]
+  domain   Domain               @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  events   MailboxAuditEvent[]
+  sessions MailboxSession[]
 
   @@unique([domainId, localPart])
   @@index([domainId, status])
+}
+
+/// Webmail session (TASK-037). Separate from Owner Session. Token hash only; password AES-GCM for IMAP duration.
+model MailboxSession {
+  id           String    @id @default(uuid())
+  mailboxId    String
+  tokenHash    String    @unique
+  /// AES-GCM blob of the mailbox password for the session lifetime. Never logged or returned.
+  secretEnc    Bytes     @db.Blob
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  lastSeenAt   DateTime?
+  ipHash       String?
+  userAgentHash String?
+  createdAt    DateTime  @default(now())
+
+  mailbox MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, expiresAt])
+  @@index([expiresAt])
 }
 
 model MailboxAuditEvent {

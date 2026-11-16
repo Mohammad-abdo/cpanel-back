@@ -48,7 +48,14 @@ export function createDomainsService({ prisma, now = () => new Date(), auditServ
   }
 
   async function load(id) {
-    const row = await prisma.domain.findUnique({ where: { id }, include: { dnsRecords: true, certificates: true } });
+    const row = await prisma.domain.findUnique({
+      where: { id },
+      include: {
+        dnsRecords: true,
+        certificates: true,
+        server: { select: { id: true, alias: true } },
+      },
+    });
     if (!row) throw new AppError(404, 'DOMAIN_NOT_FOUND', 'Domain not found');
     return row;
   }
