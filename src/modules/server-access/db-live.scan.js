@@ -37,23 +37,23 @@ function pgIdent(name) {
 }
 
 /**
- * MySQL/MariaDB CLI with several auth fallbacks. Last stderr is printed with __NT_ERR__
- * so the API can surface a useful privilege error instead of an empty 502.
+ * MySQL/MariaDB CLI with several auth fallbacks. Prefer sudo socket auth before
+ * debian.cnf (empty password in debian.cnf causes ERROR 1045 on many hosts).
+ * Last stderr is printed with __NT_ERR__ for the API error message.
  */
 export function mysqlCmd(sql, db = null) {
   const q = shQuote(sql);
   const dbArg = db ? ` ${shQuote(assertSafeDbName(db))}` : '';
   const flags = `--batch --raw --default-character-set=utf8mb4${dbArg} -e ${q}`;
   const attempts = [
-    `mysql --defaults-file=/etc/mysql/debian.cnf ${flags}`,
-    `sudo -n mysql --defaults-file=/etc/mysql/debian.cnf ${flags}`,
     `sudo -n mysql ${flags}`,
-    `mariadb --defaults-file=/etc/mysql/debian.cnf ${flags}`,
     `sudo -n mariadb ${flags}`,
-    `mysql ${flags}`,
+    `sudo -n mysql --defaults-extra-file=/etc/mysql/debian.cnf ${flags}`,
+    `sudo -n mariadb --defaults-extra-file=/etc/mysql/debian.cnf ${flags}`,
+    `mysql --defaults-extra-file=/etc/mysql/debian.cnf ${flags}`,
+    `mariadb --defaults-extra-file=/etc/mysql/debian.cnf ${flags}`,
   ];
-  // Run attempts until one prints rows; keep last stderr for diagnostics.
-  return `ERRFILE=$(mktemp); OUT=""; for __cmd in ${attempts.map(shQuote).join(' ')}; do OUT=$(sh -c "$__cmd" 2>"$ERRFILE") && break; OUT=""; done; printf '%s' "$OUT"; if [ -z "$OUT" ]; then printf '\\n__NT_ERR__%s' "$(tr '\\n' ' ' <"$ERRFILE")" >&2; fi; rm -f "$ERRFILE"; [ -n "$OUT" ]`;
+  return `ERRFILE=$(mktemp); OUT=""; for __cmd in ${attempts.map(shQuote).join(' ')}; do OUT=$(sh -c "$__cmd" 2>"$ERRFILE") && [ -n "$OUT" ] && break; OUT=""; done; printf '%s' "$OUT"; if [ -z "$OUT" ]; then printf '\\n__NT_ERR__%s' "$(tr '\\n' ' ' <"$ERRFILE")" >&2; fi; rm -f "$ERRFILE"; [ -n "$OUT" ]`;
 }
 
 export function postgresCmd(sql) {
