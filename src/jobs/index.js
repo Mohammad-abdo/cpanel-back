@@ -11,6 +11,7 @@ import { createIncidentsService } from '../modules/incidents/incidents.service.j
 import { createAccessReviewsService } from '../modules/access-reviews/access-reviews.service.js';
 import { getDeps } from '../modules/platform/platform.wiring.js';
 import { logsService } from '../modules/logs/logs.routes.js';
+import { serverAccessService } from '../modules/server-access/server-access.routes.js';
 import { createScheduler } from './scheduler.js';
 import { buildJobs, parseJobConfig } from './jobs.js';
 
@@ -23,7 +24,7 @@ export function createDefaultServices() {
     alerts: createAlertsService({ prisma, auditService, store: logsService.store }),
     reports: createReportsService({ prisma, auditService }),
     certificates: createCertificatesService(deps),
-    backups: createBackupsService(deps),
+    backups: createBackupsService({ ...deps, serverAccessService }),
     security: createSecurityService({ ...deps, incidents: createIncidentsService(deps) }),
     accessReviews: createAccessReviewsService(deps),
     auditService,

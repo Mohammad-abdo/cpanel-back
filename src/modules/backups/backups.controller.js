@@ -14,6 +14,9 @@ export function createBackupsController(svc) {
     async rpoStatus(req, res) {
       res.status(200).json({ data: await svc.rpoStatus(req.validated.params.id, req.user) });
     },
+    async destinationStatus(req, res) {
+      res.status(200).json({ data: await svc.destinationStatus(req.validated.params.id, req.user) });
+    },
     async run(req, res) {
       res.status(201).json({ data: await svc.runBackup(req.validated.params.id, req.validated.body, req.user) });
     },

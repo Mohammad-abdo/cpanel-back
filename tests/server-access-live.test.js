@@ -141,6 +141,14 @@ describe('live DB dump (fake ssh)', () => {
     await expect(t.svc.dbDump(t.serverId, { engine: 'mysql', db: 'shop_db' }, OWNER)).rejects.toMatchObject({ status: 409, code: 'DB_LOGIN_REQUIRED' });
     await expect(t.svc.dbDump(t.serverId, { engine: 'mysql', db: 'shop_db', auth: AUTH }, DEV)).rejects.toMatchObject({ status: 403 });
   });
+  it('allows SYSTEM_ACTOR for scheduled backup dumps (Owner-equivalent, no user id)', async () => {
+    const { SYSTEM_ACTOR } = await import('../src/common/system-actor.js');
+    const t = await setup();
+    const res = await t.svc.dbDump(t.serverId, { engine: 'mysql', db: 'shop_db', auth: AUTH }, SYSTEM_ACTOR);
+    expect(res.bytes.toString()).toContain('CREATE TABLE');
+    const ev = audits(t).find((e) => e.action === 'server.db.dump');
+    expect(ev.actorId).toBeNull();
+  });
   it('enforces the 80 MB size cap (413) and rejects an empty dump', async () => {
     const big = await setup({ dumpFile: { size: MAX_DB_DUMP_BYTES + 1, data: Buffer.alloc(0) } });
     await expect(big.svc.dbDump(big.serverId, { engine: 'mysql', db: 'shop_db', auth: AUTH }, OWNER)).rejects.toMatchObject({ status: 413, code: 'DB_DUMP_TOO_LARGE' });

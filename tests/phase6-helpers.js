@@ -98,6 +98,14 @@ export function backupPrisma({ runs = [], artifacts = [] } = {}, policy = BACKUP
       }),
       findMany: vi.fn(async () => [...runStore.values()].filter((r) => r.status === 'retained').sort((a, b) => b.finishedAt - a.finishedAt)),
       findUnique: vi.fn(async ({ where }) => runStore.get(where.id) ?? null),
+      count: vi.fn(async ({ where } = {}) =>
+        [...runStore.values()].filter(
+          (r) =>
+            (!where?.policyId || r.policyId === where.policyId) &&
+            (!where?.status || r.status === where.status) &&
+            (!where?.verificationStatus || r.verificationStatus === where.verificationStatus),
+        ).length,
+      ),
     },
     backupArtifact: {
       create: vi.fn(async ({ data }) => { const a = { id: U(++n), ...data }; artStore.set(a.id, a); return a; }),

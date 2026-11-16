@@ -7,9 +7,12 @@ import { createRestoresService } from './restores.service.js';
 import { createBackupsService } from '../backups/backups.service.js';
 import { getDeps } from '../platform/platform.wiring.js';
 import { wrap } from '../platform/platform.http.js';
+import { serverAccessService } from '../server-access/server-access.routes.js';
 
 const deps = getDeps();
-const c = createRestoresController(createRestoresService({ ...deps, backups: createBackupsService(deps) }));
+const c = createRestoresController(
+  createRestoresService({ ...deps, backups: createBackupsService({ ...deps, serverAccessService }) }),
+);
 const write = requireSession({ requireMfa: true });
 
 /** Mount at /restores */

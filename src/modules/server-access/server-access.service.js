@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import path from 'node:path';
 import { AppError } from '../../common/errors/app-error.js';
+import { isSystemActor } from '../../common/system-actor.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { redact } from '../audit/audit.service.js';
 import { statusFromSummary } from '../agents/agents.service.js';
@@ -264,6 +265,8 @@ export function createServerAccessService({ prisma, connector, auditService = nu
   const sshLocks = new Map();
 
   function requireOwner(actor) {
+    // Scheduled backup jobs use SYSTEM_ACTOR (isOwner, no user id).
+    if (isSystemActor(actor)) return;
     if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
     if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can use server SSH access');
   }

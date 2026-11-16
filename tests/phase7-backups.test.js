@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BACKUP_TRANSITIONS, MIN_VERIFIED_KEEP, createBackupsService } from '../src/modules/backups/backups.service.js';
 import { createPolicyBodySchema } from '../src/modules/backups/backups.validator.js';
-import { decrypt } from '../src/modules/platform/platform.crypto.js';
+import { decrypt, encrypt } from '../src/modules/platform/platform.crypto.js';
 import { BACKUP_POLICY, DEV, ENV_PROD, ENV_STAGING, KEY, OWNER, PROJECT, U, approve, backupPrisma, makeCtx } from './phase6-helpers.js';
-import { SYSTEM_ACTOR } from '../src/common/system-actor.js';
+import { SYSTEM_ACTOR, isSystemActor } from '../src/common/system-actor.js';
 
 const POLICY = U(90);
 const NOW = new Date('2026-06-01T12:00:00Z');
@@ -125,6 +125,32 @@ describe('backups: verification', () => {
   });
 });
 
+describe('backups: destination posture (TASK-024)', () => {
+  it('reports offsite health, min keep and honest UNKNOWN object-lock', async () => {
+    const t = setup({
+      runs: [{ id: U(1), policyId: POLICY, status: 'retained', verificationStatus: 'verified', finishedAt: new Date(NOW - 3600000) }],
+    });
+    const status = await t.svc.destinationStatus(POLICY, OWNER);
+    expect(status).toMatchObject({
+      destinationCategory: 'offsite',
+      encryption: expect.any(String),
+      adapterHealthy: true,
+      adapterSimulated: true,
+      minVerifiedKeep: MIN_VERIFIED_KEEP,
+      verifiedRetainedCount: 1,
+      lastVerifiedRunId: U(1),
+      compromisedAppWipeBlocked: true,
+      objectLock: 'UNKNOWN',
+      independentStorageAccount: 'REQUIRES_DECISION',
+    });
+  });
+  it('hides out-of-scope policies as 404', async () => {
+    const t = setup();
+    t.prisma.projectMember = { findMany: vi.fn(async () => []) };
+    await expect(t.svc.destinationStatus(POLICY, DEV)).rejects.toMatchObject({ status: 404, code: 'POLICY_NOT_FOUND' });
+  });
+});
+
 describe('backups: retention', () => {
   const mkRuns = (n, ageDays) => Array.from({ length: n }, (_, i) => ({ id: U(200 + i), policyId: POLICY, status: 'retained', verificationStatus: 'verified', finishedAt: new Date(NOW - (ageDays + i) * 86400000) }));
   it('always protects the newest verified sets and caps deletion at half', async () => {
@@ -207,5 +233,99 @@ describe('backups: scheduled runs and verification', () => {
     const t = sched();
     await expect(t.svc.runBackup(POLICY, run, { id: null, isOwner: true, system: true })).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
     await expect(t.svc.runBackup(POLICY, run, SYSTEM_ACTOR)).resolves.toBeTruthy();
+  });
+});
+
+describe('backups: live SSH dump hybrid', () => {
+  const SERVER = U(40);
+  const INSTANCE = U(41);
+  const DB_ROW = {
+    id: U(42),
+    projectId: PROJECT,
+    environmentId: ENV_PROD,
+    dbName: 'app_prod',
+    instance: {
+      id: INSTANCE,
+      serverId: SERVER,
+      engine: 'mysql',
+      name: 'mysql-main',
+      adminUsername: 'root',
+      adminSecretEnc: encrypt('secret-db-pass', KEY),
+    },
+  };
+
+  function setupLive(opts = {}) {
+    const extra = backupPrisma(opts);
+    const ctx = makeCtx({ now: () => NOW, grants: opts.grants ?? [] });
+    Object.assign(ctx.prisma, extra, {
+      managedDatabase: {
+        findMany: vi.fn(async () => (opts.noManaged ? [] : [DB_ROW])),
+      },
+      projectEnvVar: {
+        findMany: vi.fn(async () => [
+          { key: 'APP_URL', isSecret: false, valueEnc: encrypt('https://app.test', KEY) },
+          { key: 'API_TOKEN', isSecret: true, valueEnc: encrypt('super-secret', KEY) },
+        ]),
+      },
+    });
+    const dbDump = vi.fn(async (_serverId, args, actor) => {
+      expect(isSystemActor(actor) || actor?.isOwner).toBe(true);
+      expect(args).toMatchObject({ engine: 'mysql', db: 'app_prod', auth: { username: 'root' } });
+      expect(args.auth.password).toBe('secret-db-pass');
+      return { bytes: Buffer.from('-- live mysqldump\nCREATE TABLE t(id int);\n'), filename: 'x.sql', size: 40 };
+    });
+    const svc = createBackupsService({
+      ...ctx,
+      encryptionKey: () => KEY,
+      credentialKey: () => KEY,
+      serverAccessService: { dbDump },
+    });
+    return { ...ctx, svc, extra, dbDump };
+  }
+
+  it('Owner run uses SSH mysqldump when managed DB login exists and records liveDb', async () => {
+    const t = setupLive();
+    const res = await t.svc.runBackup(POLICY, run, OWNER);
+    expect(res.liveDb).toBe(true);
+    expect(res.simulated).toBe(false);
+    expect(t.dbDump).toHaveBeenCalledTimes(1);
+    expect(t.adapters.calls.filter((c) => c.name === 'backup.dump' && c.arg?.kind === 'db')).toHaveLength(0);
+    const up = [...t.extra.artStore.values()];
+    const dbArt = up.find((a) => a.kind === 'db');
+    expect(decrypt(await t.adapters.backupEngine.download({ locationRef: dbArt.locationRef }), KEY).toString()).toContain('live mysqldump');
+    const man = JSON.parse(
+      decrypt(await t.adapters.backupEngine.download({ locationRef: up.find((a) => a.kind === 'manifest').locationRef }), KEY),
+    );
+    expect(man.entries.find((e) => e.kind === 'db')).toMatchObject({ method: 'single-transaction', source: 'ssh-live' });
+    expect(man.entries.find((e) => e.kind === 'config')).toMatchObject({ method: 'env-metadata', source: 'panel-env' });
+    const configPlain = decrypt(await t.adapters.backupEngine.download({ locationRef: up.find((a) => a.kind === 'config').locationRef }), KEY).toString();
+    expect(configPlain).toContain('https://app.test');
+    expect(configPlain).toContain('[REDACTED]');
+    expect(configPlain).not.toContain('super-secret');
+  });
+
+  it('SYSTEM_ACTOR scheduled path can call live dump (Owner bypass for jobs)', async () => {
+    const t = setupLive();
+    const res = await t.svc.runBackup(POLICY, { ...run, trigger: 'scheduled' }, SYSTEM_ACTOR);
+    expect(res.liveDb).toBe(true);
+    expect(t.dbDump).toHaveBeenCalledTimes(1);
+  });
+
+  it('non-Owner with backup grant keeps simulated dump even when login exists', async () => {
+    const t = setupLive({
+      grants: [{ userId: DEV.id, permissionKey: 'project.backup.create', resourceId: PROJECT, environmentId: ENV_PROD }],
+    });
+    const res = await t.svc.runBackup(POLICY, run, DEV);
+    expect(res.liveDb).toBe(false);
+    expect(t.dbDump).not.toHaveBeenCalled();
+    expect(t.adapters.calls.some((c) => c.name === 'backup.dump')).toBe(true);
+  });
+
+  it('falls back to simulated dump when no managed live target exists', async () => {
+    const t = setupLive({ noManaged: true });
+    const res = await t.svc.runBackup(POLICY, run, OWNER);
+    expect(res.liveDb).toBe(false);
+    expect(t.dbDump).not.toHaveBeenCalled();
+    expect(t.adapters.calls.some((c) => c.name === 'backup.dump' && c.arg?.kind === 'db')).toBe(true);
   });
 });

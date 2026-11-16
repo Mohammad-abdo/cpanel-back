@@ -25,7 +25,17 @@ const DAY = 86400000;
 export const FREQUENCY_MS = Object.freeze({ hourly: 3600000, daily: DAY, weekly: 7 * DAY });
 export const FAILED_RETRY_MS = 15 * 60000;
 
-export function createBackupsService({ prisma, now = () => new Date(), auditService = null, rbac = null, platform = null, adapters = null, encryptionKey = () => process.env.BACKUP_ENCRYPTION_KEY }) {
+export function createBackupsService({
+  prisma,
+  now = () => new Date(),
+  auditService = null,
+  rbac = null,
+  platform = null,
+  adapters = null,
+  serverAccessService = null,
+  encryptionKey = () => process.env.BACKUP_ENCRYPTION_KEY,
+  credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
+}) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
 
   async function authorize(actor, projectId, environmentId, permissionKey = PERM.BACKUP_CREATE) {
@@ -66,6 +76,100 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
     return { bytes, plain };
   }
 
+  function instanceAuth(row) {
+    if (!row?.adminUsername || !row?.adminSecretEnc) return null;
+    return {
+      username: row.adminUsername,
+      password: decrypt(Buffer.from(row.adminSecretEnc), credentialKey()).toString('utf8'),
+    };
+  }
+
+  /**
+   * Prefer live mysqldump over SSH when a managed MySQL DB has server + saved login and the actor
+   * is Owner or SYSTEM_ACTOR. Non-owners keep the simulated adapter so BACKUP_CREATE still works.
+   */
+  async function dumpDb(policy, actor) {
+    const canLive = isSystemActor(actor) || actor?.isOwner;
+    if (canLive && serverAccessService?.dbDump && prisma.managedDatabase?.findMany) {
+      const rows = await prisma.managedDatabase.findMany({
+        where: { projectId: policy.projectId, environmentId: policy.environmentId },
+        include: { instance: true },
+        take: 20,
+      });
+      const live = rows.find((r) => {
+        const inst = r.instance;
+        return (
+          inst?.serverId &&
+          (inst.engine === 'mysql' || inst.engine === 'postgres') &&
+          inst.adminUsername &&
+          inst.adminSecretEnc
+        );
+      });
+      if (live) {
+        const auth = instanceAuth(live.instance);
+        const result = await serverAccessService.dbDump(
+          live.instance.serverId,
+          { engine: live.instance.engine, db: live.dbName, auth },
+          actor,
+        );
+        const bytes = Buffer.isBuffer(result.bytes) ? result.bytes : Buffer.from(result.bytes ?? '');
+        if (!bytes.length) throw new AppError(502, 'DB_DUMP_EMPTY', 'Live database dump was empty');
+        return {
+          bytes,
+          consistent: true,
+          method: live.instance.engine === 'mysql' ? 'single-transaction' : 'pg-dump',
+          simulated: false,
+          source: 'ssh-live',
+        };
+      }
+    }
+    return adapters.backupEngine.dump({ kind: 'db', ref: policy.projectId });
+  }
+
+  /**
+   * Config backup: environment variable metadata. Secret values stay redacted; plaintext never
+   * leaves the encrypt stage except as AES-GCM ciphertext destined for offsite storage.
+   */
+  async function dumpConfig(policy) {
+    if (!prisma.projectEnvVar?.findMany) {
+      return adapters.backupEngine.dump({ kind: 'config', ref: policy.projectId });
+    }
+    const vars = await prisma.projectEnvVar.findMany({
+      where: { environmentId: policy.environmentId },
+      orderBy: { key: 'asc' },
+    });
+    const payload = {
+      projectId: policy.projectId,
+      environmentId: policy.environmentId,
+      exportedAt: now().toISOString(),
+      vars: vars.map((v) => {
+        if (v.isSecret) return { key: v.key, isSecret: true, value: '[REDACTED]' };
+        try {
+          return {
+            key: v.key,
+            isSecret: false,
+            value: decrypt(Buffer.from(v.valueEnc), credentialKey()).toString('utf8'),
+          };
+        } catch {
+          return { key: v.key, isSecret: false, value: '[UNREADABLE]' };
+        }
+      }),
+    };
+    return {
+      bytes: Buffer.from(JSON.stringify(payload, null, 2), 'utf8'),
+      consistent: true,
+      method: 'env-metadata',
+      simulated: false,
+      source: 'panel-env',
+    };
+  }
+
+  async function dumpPart(kind, policy, actor) {
+    if (kind === 'db') return dumpDb(policy, actor);
+    if (kind === 'config') return dumpConfig(policy);
+    return adapters.backupEngine.dump({ kind, ref: policy.projectId });
+  }
+
   return {
     verifyArtifactBytes,
 
@@ -97,6 +201,41 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
       return { status: ageMin <= policy.rpoMinutes ? 'within_rpo' : 'rpo_breached', ageMinutes: ageMin, rpoMinutes: policy.rpoMinutes, rtoMinutes: policy.rtoMinutes, lastRunId: last.id };
     },
 
+    /**
+     * Offsite destination posture for TASK-024: adapter health, encryption/category, and the
+     * application-level guarantee that retention never deletes the newest MIN_VERIFIED_KEEP sets.
+     * Object-lock / separate cloud account independence remains UNKNOWN until configured.
+     */
+    async destinationStatus(policyId, actor) {
+      const policy = await loadVisiblePolicy(policyId, actor);
+      const health = adapters?.backupEngine?.health
+        ? await adapters.backupEngine.health({ policyId, destinationCategory: policy.destinationCategory })
+        : { healthy: false, reason: 'adapter_unavailable' };
+      const last = await prisma.backupRun.findFirst({
+        where: { policyId, status: 'retained', verificationStatus: 'verified' },
+        orderBy: { finishedAt: 'desc' },
+      });
+      const verifiedCount = await prisma.backupRun.count?.({
+        where: { policyId, status: 'retained', verificationStatus: 'verified' },
+      });
+      return {
+        policyId,
+        destinationCategory: policy.destinationCategory ?? 'offsite',
+        encryption: policy.encryption ?? 'aes-256-gcm',
+        adapterHealthy: Boolean(health?.healthy),
+        adapterSimulated: Boolean(adapters?.simulated),
+        minVerifiedKeep: MIN_VERIFIED_KEEP,
+        verifiedRetainedCount: typeof verifiedCount === 'number' ? verifiedCount : null,
+        lastVerifiedRunId: last?.id ?? null,
+        lastVerifiedAt: last?.finishedAt ?? null,
+        // App-level: retention plan never removes the newest MIN_VERIFIED_KEEP verified sets.
+        compromisedAppWipeBlocked: true,
+        // Storage-level immutability / separate credentials: not claimed without real offsite config.
+        objectLock: 'UNKNOWN',
+        independentStorageAccount: 'REQUIRES_DECISION',
+      };
+    },
+
     async runBackup(policyId, input, actor) {
       const policy = await loadPolicy(policyId);
       if (policy.environmentId && policy.environmentId !== input.environmentId) {
@@ -115,11 +254,13 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
         await stage('queued');
         await stage('snapshot');
         const parts = [];
+        let usedLiveDb = false;
         for (const kind of input.kinds) {
-          const d = await adapters.backupEngine.dump({ kind, ref: policy.projectId });
+          const d = await dumpPart(kind, policy, actor);
           // A database dump taken while writes continue must come from a consistent snapshot.
           if (kind === 'db' && !d.consistent) throw new AppError(500, 'SNAPSHOT_INCONSISTENT', 'Database dump was not taken from a consistent snapshot');
-          parts.push({ kind, plain: d.bytes, method: d.method });
+          if (kind === 'db' && d.source === 'ssh-live') usedLiveDb = true;
+          parts.push({ kind, plain: d.bytes, method: d.method, source: d.source ?? (adapters.simulated ? 'simulated' : 'adapter') });
         }
         await stage('encrypt');
         const key = encryptionKey(); // throws if the key is missing; nothing is uploaded unencrypted
@@ -128,9 +269,16 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
           runId: run.id,
           trigger: input.trigger,
           createdAt: now().toISOString(),
-          entries: encrypted.map((e) => ({ kind: e.kind, method: e.method, plainChecksum: sha256(e.plain), checksum: sha256(e.cipher), sizeBytes: e.cipher.length })),
+          entries: encrypted.map((e) => ({
+            kind: e.kind,
+            method: e.method,
+            source: e.source,
+            plainChecksum: sha256(e.plain),
+            checksum: sha256(e.cipher),
+            sizeBytes: e.cipher.length,
+          })),
         };
-        encrypted.push({ kind: 'manifest', cipher: encrypt(JSON.stringify(manifest), key) });
+        encrypted.push({ kind: 'manifest', cipher: encrypt(JSON.stringify(manifest), key), source: 'panel' });
         await stage('upload');
         const artifacts = [];
         for (const e of encrypted) {
@@ -149,8 +297,23 @@ export function createBackupsService({ prisma, now = () => new Date(), auditServ
         if (missing.length) throw new AppError(500, 'MANIFEST_INCOMPLETE', `Backup set is incomplete: ${missing.join(', ')}`);
         await stage('retained');
         run = { ...run, ...(await prisma.backupRun.update({ where: { id: run.id }, data: { finishedAt: now(), verificationStatus: 'verified' } })) };
-        await audit({ actorId: actor.id ?? null, action: 'backup.run', resourceType: 'backup_policy', resourceId: policyId, environmentId: input.environmentId, result: 'success', after: { runId: run.id, kinds: input.kinds, trigger: input.trigger } });
-        return { run, artifacts: saved.map((s) => ({ id: s.id, kind: s.kind, checksum: s.checksum })), simulated: Boolean(adapters.simulated) };
+        await audit({
+          actorId: actor.id ?? null,
+          action: 'backup.run',
+          resourceType: 'backup_policy',
+          resourceId: policyId,
+          environmentId: input.environmentId,
+          result: 'success',
+          after: { runId: run.id, kinds: input.kinds, trigger: input.trigger, liveDb: usedLiveDb },
+        });
+        // simulated=false only when every requested part came from a non-simulated source; live DB + panel config still marks hybrid.
+        const hybrid = parts.some((p) => p.source === 'ssh-live' || p.source === 'panel-env');
+        return {
+          run,
+          artifacts: saved.map((s) => ({ id: s.id, kind: s.kind, checksum: s.checksum })),
+          simulated: hybrid ? false : Boolean(adapters.simulated),
+          liveDb: usedLiveDb,
+        };
       } catch (err) {
         for (const ref of uploaded) await adapters.backupEngine.remove({ locationRef: ref }).catch(() => {});
         const failedFrom = run.status;
