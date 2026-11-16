@@ -33,15 +33,22 @@ const iso = (msAgo = 0) => new Date(Date.now() - msAgo).toISOString();
 const HOUR = 3600_000;
 
 async function call(token, method, path, body, extraHeaders = {}) {
-  const res = await fetch(API + path, {
-    method,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: token.startsWith('Agent ') ? token : `Bearer ${token}` } : {}),
-      ...extraHeaders,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(API + path, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: token.startsWith('Agent ') ? token : `Bearer ${token}` } : {}),
+        ...extraHeaders,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new Error(
+      `Cannot reach API at ${API} (${e.cause?.code ?? e.message}). Start it first: npm run dev --workspace nodeteam-api`,
+    );
+  }
   let json = null;
   try {
     json = await res.json();
