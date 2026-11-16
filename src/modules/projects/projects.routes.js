@@ -23,11 +23,13 @@ import { createProjectsService } from './projects.service.js';
 import { prisma } from '../../config/prisma.js';
 import { createAuditService } from '../audit/audit.service.js';
 import { operationsService } from '../operations/operations.routes.js';
+import { serverAccessService } from '../server-access/server-access.routes.js';
 
 const projectsService = createProjectsService({
   prisma,
   auditService: createAuditService({ prisma }),
   operationsService,
+  serverAccessService,
 });
 const c = createProjectsController(projectsService);
 const mfa = requireSession({ requireMfa: true });
@@ -41,6 +43,7 @@ projectsRouter.post('/', mfa, validate(createProjectBodySchema, 'body'), wrap(c.
 projectsRouter.post('/discover', mfa, validate(discoverBodySchema, 'body'), wrap(c.discover));
 projectsRouter.get('/:id', requireSession(), params, wrap(c.get));
 projectsRouter.get('/:id/overview', requireSession(), params, validate(projectOverviewQuerySchema, 'query'), wrap(c.overview));
+projectsRouter.get('/:id/live', mfa, params, wrap(c.live));
 projectsRouter.get('/:id/members', requireSession(), params, wrap(c.members));
 projectsRouter.get('/:id/teams', requireSession(), params, wrap(c.teams));
 projectsRouter.post('/:id/teams', mfa, params, validate(projectTeamBodySchema, 'body'), wrap(c.linkTeam));

@@ -78,6 +78,10 @@ export function createProjectsController(projectsService) {
       res.status(200).json({ data: result });
     },
 
+    async live(req, res) {
+      res.status(200).json({ data: await projectsService.live(req.validated.params.id, req.user) });
+    },
+
     async archive(req, res) {
       const row = await projectsService.archive(req.validated.params.id, req.validated.body, req.user);
       res.status(200).json({ data: row });

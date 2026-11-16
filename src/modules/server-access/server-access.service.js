@@ -4,6 +4,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { execCommand, execScript, openSftp } from './ssh.connector.js';
 import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
+import { SITE_LIVE_SCRIPT, assertSafeSitePath, parseSiteLive } from './site-live.scan.js';
 
 const posix = path.posix;
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
@@ -392,6 +393,36 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         return { name, action, ok, exitCode: res.code, output: res.stdout.slice(-8000) };
       } finally {
         client.end();
+      }
+    },
+
+    /**
+     * Live read-only inspect of one site path (PM2 processes, recent logs, listing).
+     * Used by project detail so discovered/active apps show real runtime state.
+     */
+    async inspectSite(serverId, { path, name = '', slug = '' }, actor) {
+      requireOwner(actor);
+      if (!assertSafeSitePath(path)) throw new AppError(400, 'PATH_INVALID', 'Invalid project path');
+      const cred = await loadCredential(serverId);
+      let client;
+      try {
+        ({ client } = await connectWith(cred));
+        const res = await execScript(client, SITE_LIVE_SCRIPT, {
+          maxBytes: 384 * 1024,
+          timeoutMs: 45_000,
+          args: [path, name || '', slug || ''],
+        });
+        if (res.timedOut) throw new AppError(504, 'SITE_LIVE_TIMEOUT', 'Live site inspect timed out');
+        return parseSiteLive(res.stdout, { path, name, slug });
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        throw new AppError(502, 'SITE_LIVE_FAILED', err?.message || 'Live site inspect failed');
+      } finally {
+        try {
+          client?.end();
+        } catch {
+          /* ignore */
+        }
       }
     },
 

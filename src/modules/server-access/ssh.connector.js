@@ -77,11 +77,13 @@ export function execCommand(client, command, { maxBytes = 64 * 1024, timeoutMs =
 
 /**
  * Runs a multi-line script on stdin via `bash -s` (avoids bash -c newline/quoting breakage).
- * Script must be fixed/trusted — never interpolate user input into it.
+ * Script body must be fixed/trusted. Optional `args` are passed as "$1" "$2"... via JSON quoting.
  */
-export function execScript(client, script, { maxBytes = 64 * 1024, timeoutMs = 10_000 } = {}) {
+export function execScript(client, script, { maxBytes = 64 * 1024, timeoutMs = 10_000, args = [] } = {}) {
+  const suffix = (args ?? []).map((a) => JSON.stringify(String(a))).join(' ');
+  const command = suffix ? `bash -s -- ${suffix}` : 'bash -s';
   return new Promise((resolve, reject) => {
-    client.exec('bash -s', (err, stream) => {
+    client.exec(command, (err, stream) => {
       if (err) return reject(new AppError(502, 'SSH_EXEC_FAILED', 'Could not run the script over SSH'));
       let out = '';
       const timer = setTimeout(() => {

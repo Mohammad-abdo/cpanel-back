@@ -47,7 +47,13 @@ export async function computeSharedImpact(prisma, projectId) {
   };
 }
 
-export function createProjectsService({ prisma, now = () => new Date(), auditService = null, operationsService = null }) {
+export function createProjectsService({
+  prisma,
+  now = () => new Date(),
+  auditService = null,
+  operationsService = null,
+  serverAccessService = null,
+}) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const access = createProjectAccess({ prisma, now });
   const teamOps = createProjectTeamOps({ prisma, now, auditService });
@@ -338,6 +344,44 @@ export function createProjectsService({ prisma, now = () => new Date(), auditSer
       await loadProject(id);
       await access.requireView(actor, id);
       return computeSharedImpact(prisma, id);
+    },
+
+    /**
+     * Live SSH snapshot for project detail (PM2 status + recent logs).
+     * Works for discovered and linked projects when an SSH login exists.
+     */
+    async live(id, actor) {
+      if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+      if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can inspect live project runtime over SSH');
+      if (!serverAccessService?.inspectSite) {
+        throw new AppError(500, 'LIVE_UNAVAILABLE', 'Live site inspect is not wired');
+      }
+      const project = await prisma.project.findUnique({
+        where: { id },
+        include: { runtime: true },
+      });
+      if (!project || !(await access.canView(actor, id))) throw new AppError(404, 'PROJECT_NOT_FOUND', 'Project not found');
+      const path = project.runtime?.metaJson?.discoveredPath;
+      if (!path) {
+        return {
+          available: false,
+          reason: 'no-path',
+          message: 'No discovered path on this project. Re-run server inventory or set the runtime path.',
+          processes: [],
+          logs: { source: null, lines: [] },
+        };
+      }
+      const live = await serverAccessService.inspectSite(
+        project.serverId,
+        { path, name: project.name, slug: project.slug },
+        actor,
+      );
+      return {
+        available: true,
+        projectId: id,
+        processManager: project.runtime?.processManager ?? null,
+        ...live,
+      };
     },
 
     async archive(id, input, actor) {
