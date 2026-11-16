@@ -9,6 +9,10 @@ import { createSshConnector } from './ssh.connector.js';
 import {
   addServerBodySchema,
   credentialBodySchema,
+  dbEngineParamsSchema,
+  dbQueryBodySchema,
+  dbTableQuerySchema,
+  dbTablesQuerySchema,
   deleteQuerySchema,
   listQuerySchema,
   mkdirBodySchema,
@@ -43,6 +47,13 @@ serverAccessRouter.delete('/:id/ssh', owner, params, wrap(c.removeCredential));
 serverAccessRouter.post('/:id/ssh/test', owner, params, wrap(c.test));
 serverAccessRouter.get('/:id/ssh/info', owner, params, wrap(c.info));
 serverAccessRouter.post('/:id/ssh/service', owner, params, validate(serviceBodySchema, 'body'), wrap(c.service));
+
+const dbParams = validate(dbEngineParamsSchema, 'params');
+serverAccessRouter.get('/:id/ssh/db/:engine/schemas', owner, dbParams, wrap(c.dbSchemas));
+serverAccessRouter.get('/:id/ssh/db/:engine/tables', owner, dbParams, validate(dbTablesQuerySchema, 'query'), wrap(c.dbTables));
+serverAccessRouter.get('/:id/ssh/db/:engine/columns', owner, dbParams, validate(dbTableQuerySchema, 'query'), wrap(c.dbColumns));
+serverAccessRouter.get('/:id/ssh/db/:engine/rows', owner, dbParams, validate(dbTableQuerySchema, 'query'), wrap(c.dbRows));
+serverAccessRouter.post('/:id/ssh/db/:engine/query', owner, dbParams, validate(dbQueryBodySchema, 'body'), wrap(c.dbQuery));
 
 serverAccessRouter.get('/:id/files', owner, params, validate(listQuerySchema, 'query'), wrap(c.list));
 serverAccessRouter.get('/:id/files/content', owner, params, validate(pathQuerySchema, 'query'), wrap(c.read));

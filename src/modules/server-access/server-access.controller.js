@@ -60,5 +60,36 @@ export function createServerAccessController(svc) {
     async importInventory(req, res) {
       res.status(200).json({ data: await svc.importInventory(id(req), req.validated.body ?? {}, req.user) });
     },
+    async dbSchemas(req, res) {
+      const { id: serverId, engine } = req.validated.params;
+      res.status(200).json({ data: await svc.dbBrowse(serverId, { engine, action: 'schemas' }, req.user) });
+    },
+    async dbTables(req, res) {
+      const { id: serverId, engine } = req.validated.params;
+      res.status(200).json({
+        data: await svc.dbBrowse(serverId, { engine, action: 'tables', db: req.validated.query.db }, req.user),
+      });
+    },
+    async dbColumns(req, res) {
+      const { id: serverId, engine } = req.validated.params;
+      const { db, table } = req.validated.query;
+      res.status(200).json({
+        data: await svc.dbBrowse(serverId, { engine, action: 'columns', db, table }, req.user),
+      });
+    },
+    async dbRows(req, res) {
+      const { id: serverId, engine } = req.validated.params;
+      const { db, table, limit, offset } = req.validated.query;
+      res.status(200).json({
+        data: await svc.dbBrowse(serverId, { engine, action: 'rows', db, table, limit, offset }, req.user),
+      });
+    },
+    async dbQuery(req, res) {
+      const { id: serverId, engine } = req.validated.params;
+      const { sql, db } = req.validated.body;
+      res.status(200).json({
+        data: await svc.dbBrowse(serverId, { engine, action: 'query', sql, db }, req.user),
+      });
+    },
   };
 }

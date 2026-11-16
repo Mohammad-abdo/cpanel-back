@@ -54,3 +54,32 @@ export const inventoryImportBodySchema = z
     importAll: z.boolean().optional(),
   })
   .strict();
+
+export const dbEngineParamsSchema = z
+  .object({
+    id: z.string().uuid(),
+    engine: z.enum(['mysql', 'postgres']),
+  })
+  .strict();
+
+export const dbTablesQuerySchema = z
+  .object({
+    db: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
+  })
+  .strict();
+
+export const dbTableQuerySchema = z
+  .object({
+    db: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
+    table: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/),
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+    offset: z.coerce.number().int().min(0).max(100000).optional(),
+  })
+  .strict();
+
+export const dbQueryBodySchema = z
+  .object({
+    sql: z.string().min(1).max(20000),
+    db: z.string().regex(/^[A-Za-z0-9_]{1,64}$/).optional(),
+  })
+  .strict();

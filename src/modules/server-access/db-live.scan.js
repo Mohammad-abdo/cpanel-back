@@ -148,7 +148,8 @@ export function selectRowsSql(engine, db, table, limit = 50, offset = 0) {
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const off = Math.min(Math.max(Number(offset) || 0, 0), 100000);
   if (engine === 'mysql') {
-    return `SELECT * FROM ${mysqlIdent(db)}.${mysqlIdent(table)} LIMIT ${lim} OFFSET ${off}`;
+    // Database is selected via mysql CLI db argument; quote table only.
+    return `SELECT * FROM ${mysqlIdent(table)} LIMIT ${lim} OFFSET ${off}`;
   }
   return `SELECT * FROM ${pgIdent(table)} LIMIT ${lim} OFFSET ${off}`;
 }
