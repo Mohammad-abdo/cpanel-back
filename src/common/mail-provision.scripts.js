@@ -139,7 +139,11 @@ const STEP_SCRIPTS = {
   ),
 
   opendkim: lines(
-    'mkdir -p /etc/opendkim/keys && touch /etc/opendkim/KeyTable /etc/opendkim/SigningTable /etc/opendkim/TrustedHosts',
+    // Align package defaults with our inet milter socket. Ubuntu's /etc/default/opendkim often
+    // keeps a unix SOCKET= that fights the conf file and makes systemctl restart hang/timeout.
+    'mkdir -p /etc/opendkim/keys /run/opendkim',
+    'touch /etc/opendkim/KeyTable /etc/opendkim/SigningTable /etc/opendkim/TrustedHosts',
+    'chown opendkim:opendkim /run/opendkim || true',
     "cat > /etc/opendkim.conf <<'NTEOF'",
     '# Managed by NodeTeam panel.',
     'Syslog yes',
@@ -151,9 +155,16 @@ const STEP_SCRIPTS = {
     'ExternalIgnoreList refile:/etc/opendkim/TrustedHosts',
     'InternalHosts refile:/etc/opendkim/TrustedHosts',
     'Socket inet:8891@127.0.0.1',
+    'PidFile /run/opendkim/opendkim.pid',
     'UserID opendkim',
     'NTEOF',
     'echo "127.0.0.1" > /etc/opendkim/TrustedHosts',
+    'if [ -f /etc/default/opendkim ]; then',
+    '  sed -i -E \'s|^#?\\s*SOCKET=.*|SOCKET="inet:8891@127.0.0.1"|\' /etc/default/opendkim',
+    '  grep -q \'^SOCKET=\' /etc/default/opendkim || echo \'SOCKET="inet:8891@127.0.0.1"\' >> /etc/default/opendkim',
+    'else',
+    '  printf \'SOCKET="inet:8891@127.0.0.1"\\n\' > /etc/default/opendkim',
+    'fi',
     'chown -R opendkim:opendkim /etc/opendkim && chmod 0750 /etc/opendkim /etc/opendkim/keys',
   ),
 
@@ -188,9 +199,28 @@ const STEP_SCRIPTS = {
 
   services: lines(
     'systemctl enable postfix dovecot opendkim rspamd >/dev/null 2>&1 || true',
-    'systemctl restart opendkim rspamd dovecot postfix',
-    'sleep 2',
-    'for s in postfix dovecot opendkim rspamd; do systemctl is-active --quiet "$s" || { echo "service $s not active" >&2; exit 1; }; done',
+    'mkdir -p /run/opendkim; chown opendkim:opendkim /run/opendkim 2>/dev/null || true',
+    // Restart one-by-one. A single `systemctl restart a b c` waits on the slowest unit and
+    // OpenDKIM often hits the default start timeout when SOCKET defaults disagree.
+    'for s in opendkim rspamd dovecot postfix; do',
+    '  systemctl reset-failed "$s" >/dev/null 2>&1 || true',
+    '  if ! systemctl restart "$s"; then',
+    '    echo "restart failed: $s" >&2',
+    '    systemctl status "$s" --no-pager -l >&2 || true',
+    '    journalctl -u "$s" -n 30 --no-pager >&2 || true',
+    '    exit 1',
+    '  fi',
+    '  ok=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do',
+    '    if systemctl is-active --quiet "$s"; then ok=1; break; fi',
+    '    sleep 1',
+    '  done',
+    '  if [ "$ok" != 1 ]; then',
+    '    echo "service $s not active" >&2',
+    '    systemctl status "$s" --no-pager -l >&2 || true',
+    '    journalctl -u "$s" -n 30 --no-pager >&2 || true',
+    '    exit 1',
+    '  fi',
+    'done',
     'echo "NT_RESULT services=active"',
   ),
 };

@@ -227,41 +227,54 @@ export function createMailServerService({ prisma, now = () => new Date(), auditS
       let stackVersion = null;
       let health = null;
       const mark = (id, status, detail = null) => results.push({ id, status, detail, at: now().toISOString() });
-      await runSession(serverId, async (s) => {
-        const kv = parseKeyValues((await s.run(preflightScript(), { timeoutMs: 30_000 })).stdout);
-        const pre = evaluatePrerequisites(kv);
-        if (!pre.ok) {
-          mark('preflight', 'failed', pre.blockers.join('; ').slice(0, 400));
-          failedStep = 'preflight';
-          return;
-        }
-        mark('preflight', 'ok', pre.warnings.join('; ') || null);
-        for (const id of PROVISION_STEP_ORDER) {
-          let res;
+      try {
+        await runSession(serverId, async (s) => {
+          const kv = parseKeyValues((await s.run(preflightScript(), { timeoutMs: 30_000 })).stdout);
+          const pre = evaluatePrerequisites(kv);
+          if (!pre.ok) {
+            mark('preflight', 'failed', pre.blockers.join('; ').slice(0, 400));
+            failedStep = 'preflight';
+            return;
+          }
+          mark('preflight', 'ok', pre.warnings.join('; ') || null);
+          for (const id of PROVISION_STEP_ORDER) {
+            let res;
+            try {
+              // services waits up to ~15s per unit; packages can take several minutes on first apt.
+              const timeoutMs = id === 'packages' ? 900_000 : id === 'services' ? 300_000 : 120_000;
+              res = await s.run(stepScript(id), { args: assertSafeArgs([host]), timeoutMs });
+            } catch (e) {
+              mark(id, 'failed', String(e?.code ?? 'SSH_ERROR'));
+              failedStep = id;
+              return;
+            }
+            if (res.timedOut || res.code !== 0) {
+              mark(id, 'failed', res.timedOut ? 'timed out' : String(res.stderr || `exit ${res.code}`).trim().slice(0, 240));
+              failedStep = id;
+              return;
+            }
+            const out = parseKeyValues(res.stdout);
+            if (out.stack_version) stackVersion = out.stack_version;
+            mark(id, 'ok', out.tls ? `tls=${out.tls}` : null);
+          }
           try {
-            res = await s.run(stepScript(id), { args: assertSafeArgs([host]), timeoutMs: id === 'packages' ? 900_000 : 120_000 });
+            health = evaluateHealth(parseKeyValues((await s.run(healthScript(), { timeoutMs: 60_000 })).stdout));
+            mark('health', health.ok ? 'ok' : 'warning', health.checks.filter((c) => !c.pass).map((c) => c.id).join(', ') || null);
           } catch (e) {
-            mark(id, 'failed', String(e?.code ?? 'SSH_ERROR'));
-            failedStep = id;
-            return;
+            mark('health', 'warning', String(e?.code ?? 'SSH_ERROR'));
           }
-          if (res.timedOut || res.code !== 0) {
-            mark(id, 'failed', res.timedOut ? 'timed out' : String(res.stderr || `exit ${res.code}`).trim().slice(0, 240));
-            failedStep = id;
-            return;
-          }
-          const out = parseKeyValues(res.stdout);
-          if (out.stack_version) stackVersion = out.stack_version;
-          mark(id, 'ok', out.tls ? `tls=${out.tls}` : null);
+        });
+      } catch (e) {
+        if (!failedStep) {
+          failedStep = 'session';
+          mark('session', 'failed', String(e?.code ?? e?.message ?? 'SSH_ERROR').slice(0, 240));
         }
-        try {
-          health = evaluateHealth(parseKeyValues((await s.run(healthScript(), { timeoutMs: 60_000 })).stdout));
-          mark('health', health.ok ? 'ok' : 'warning', health.checks.filter((c) => !c.pass).map((c) => c.id).join(', ') || null);
-        } catch (e) {
-          mark('health', 'warning', String(e?.code ?? 'SSH_ERROR'));
-        }
-      });
+      }
       const ok = failedStep === null;
+      // Soft-fail: put the single-use approval back so Finish / Apply now can retry.
+      if (!ok && input.approvalId && platform.releaseFailedExecution) {
+        await platform.releaseFailedExecution(input.approvalId, actor);
+      }
       await persist(serverId, row, {
         status: ok ? 'enabled' : 'error',
         provisioned: ok ? true : (row?.provisioned ?? false),

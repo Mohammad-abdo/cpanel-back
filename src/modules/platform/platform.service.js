@@ -78,6 +78,29 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
       return { proceed: true, approval: row };
     },
 
+    /**
+     * Soft-failed privileged actions (e.g. mail provision step failure) put the approval back to
+     * approved so the requester can Finish / retry without minting a new request.
+     */
+    async releaseFailedExecution(approvalId, actor) {
+      if (!approvalId || !actor?.id) return { released: false };
+      const claimed = await prisma.approvalRequest.updateMany({
+        where: { id: approvalId, status: 'consumed', requesterId: actor.id },
+        data: { status: 'approved' },
+      });
+      if (claimed.count === 1) {
+        await audit({
+          actorId: actor.id,
+          action: 'approval.release',
+          resourceType: 'platform',
+          resourceId: approvalId,
+          result: 'success',
+          metadata: { reason: 'execution_failed' },
+        });
+      }
+      return { released: claimed.count === 1 };
+    },
+
     async decide(id, { decision, note }, actor) {
       if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
       // Permission first: someone without approval rights must not learn whether a request exists or its state.
