@@ -232,3 +232,104 @@ export function isMutatingSql(sql) {
     .toUpperCase();
   return /^(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|RENAME|CALL|LOAD|IMPORT|COPY)\b/.test(head);
 }
+
+function writeMysqlCnf(auth) {
+  const user = assertSafeDbUser(auth.username);
+  const pass = String(auth.password ?? '');
+  return [
+    'CFG=$(mktemp)',
+    'chmod 600 "$CFG"',
+    `printf '%s\\n' '[client]' 'user=${user}' >"$CFG"`,
+    `printf 'password=%s\\n' ${shQuote(pass)} >>"$CFG"`,
+  ].join('; ');
+}
+
+/**
+ * Dump one schema or all databases to OUT path on the remote host.
+ * Requires auth for MySQL; Postgres uses auth or falls back to peer/sudo when auth is null.
+ */
+export function buildDumpCommand(engine, { db = null, auth = null, outPath }) {
+  if (!outPath || typeof outPath !== 'string' || !outPath.startsWith('/tmp/')) {
+    throw Object.assign(new Error('Invalid dump path'), { code: 'DB_DUMP_PATH' });
+  }
+  const out = shQuote(outPath);
+  if (engine === 'mysql') {
+    if (!auth?.username) throw Object.assign(new Error('MySQL dump requires a saved DB login'), { code: 'DB_LOGIN_REQUIRED' });
+    const target = db ? shQuote(assertSafeDbName(db)) : '--all-databases';
+    return [
+      writeMysqlCnf(auth),
+      'ERRFILE=$(mktemp)',
+      `mysqldump --defaults-extra-file="$CFG" --single-transaction --routines --triggers --events --hex-blob ${target} >${out} 2>"$ERRFILE"`,
+      'EC=$?',
+      'rm -f "$CFG"',
+      'if [ "$EC" -ne 0 ]; then printf "__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; rm -f "$ERRFILE" ' + out + '; exit 1; fi',
+      'rm -f "$ERRFILE"',
+      `test -s ${out}`,
+    ].join('; ');
+  }
+  if (engine === 'postgres') {
+    if (auth?.username) {
+      const user = assertSafeDbUser(auth.username);
+      const pass = String(auth.password ?? '');
+      if (db) {
+        return [
+          `export PGPASSWORD=${shQuote(pass)}`,
+          `pg_dump -U ${shQuote(user)} -d ${shQuote(assertSafeDbName(db))} -F p --no-owner --no-acl >${out}`,
+          'EC=$?',
+          'unset PGPASSWORD',
+          `test "$EC" -eq 0 && test -s ${out}`,
+        ].join('; ');
+      }
+      return [
+        `export PGPASSWORD=${shQuote(pass)}`,
+        `pg_dumpall -U ${shQuote(user)} --no-role-passwords >${out}`,
+        'EC=$?',
+        'unset PGPASSWORD',
+        `test "$EC" -eq 0 && test -s ${out}`,
+      ].join('; ');
+    }
+    if (db) {
+      return `sudo -n -u postgres pg_dump -d ${shQuote(assertSafeDbName(db))} -F p --no-owner --no-acl >${out}`;
+    }
+    return `sudo -n -u postgres pg_dumpall --no-role-passwords >${out}`;
+  }
+  throw Object.assign(new Error('Unsupported engine'), { code: 'DB_ENGINE_INVALID' });
+}
+
+/** Restore a SQL dump file into one schema (optional) or the whole server. */
+export function buildRestoreCommand(engine, { db = null, auth = null, inPath }) {
+  if (!inPath || typeof inPath !== 'string' || !inPath.startsWith('/tmp/')) {
+    throw Object.assign(new Error('Invalid restore path'), { code: 'DB_RESTORE_PATH' });
+  }
+  const inn = shQuote(inPath);
+  if (engine === 'mysql') {
+    if (!auth?.username) throw Object.assign(new Error('MySQL restore requires a saved DB login'), { code: 'DB_LOGIN_REQUIRED' });
+    const dbArg = db ? ` ${shQuote(assertSafeDbName(db))}` : '';
+    return [
+      writeMysqlCnf(auth),
+      'ERRFILE=$(mktemp)',
+      `mysql --defaults-extra-file="$CFG"${dbArg} <${inn} 2>"$ERRFILE"`,
+      'EC=$?',
+      'rm -f "$CFG"',
+      'if [ "$EC" -ne 0 ]; then printf "__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; rm -f "$ERRFILE"; exit 1; fi',
+      'rm -f "$ERRFILE"',
+    ].join('; ');
+  }
+  if (engine === 'postgres') {
+    if (auth?.username) {
+      const user = assertSafeDbUser(auth.username);
+      const pass = String(auth.password ?? '');
+      const dbName = db ? assertSafeDbName(db) : 'postgres';
+      return [
+        `export PGPASSWORD=${shQuote(pass)}`,
+        `psql -U ${shQuote(user)} -d ${shQuote(dbName)} -v ON_ERROR_STOP=1 -f ${inn}`,
+        'EC=$?',
+        'unset PGPASSWORD',
+        'test "$EC" -eq 0',
+      ].join('; ');
+    }
+    const dbName = db ? assertSafeDbName(db) : 'postgres';
+    return `sudo -n -u postgres psql -d ${shQuote(dbName)} -v ON_ERROR_STOP=1 -f ${inn}`;
+  }
+  throw Object.assign(new Error('Unsupported engine'), { code: 'DB_ENGINE_INVALID' });
+}

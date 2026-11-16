@@ -134,6 +134,32 @@ export function createDatabasesService({
       );
     },
 
+    async liveDump(id, { db = null } = {}, actor) {
+      requireOwner(actor);
+      if (!serverAccessService?.dbDump) throw new AppError(500, 'LIVE_UNAVAILABLE', 'Live dump is not wired');
+      const row = await loadInstance(id, actor);
+      if (!row.serverId) throw new AppError(409, 'INSTANCE_NO_SERVER', 'This instance is not linked to a server');
+      if (row.engine !== 'mysql' && row.engine !== 'postgres') {
+        throw new AppError(422, 'ENGINE_UNSUPPORTED', 'Dump supports MySQL and Postgres only');
+      }
+      return serverAccessService.dbDump(row.serverId, { engine: row.engine, db: db || null, auth: instanceAuth(row) }, actor);
+    },
+
+    async liveRestore(id, { db = null, bytes, confirm }, actor) {
+      requireOwner(actor);
+      if (!serverAccessService?.dbRestore) throw new AppError(500, 'LIVE_UNAVAILABLE', 'Live restore is not wired');
+      const row = await loadInstance(id, actor);
+      if (!row.serverId) throw new AppError(409, 'INSTANCE_NO_SERVER', 'This instance is not linked to a server');
+      if (row.engine !== 'mysql' && row.engine !== 'postgres') {
+        throw new AppError(422, 'ENGINE_UNSUPPORTED', 'Restore supports MySQL and Postgres only');
+      }
+      return serverAccessService.dbRestore(
+        row.serverId,
+        { engine: row.engine, db: db || null, auth: instanceAuth(row), bytes, confirm },
+        actor,
+      );
+    },
+
     async createInstance(input, actor) {
       if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
       const resourceType = input.serverId ? 'server' : 'platform';

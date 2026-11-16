@@ -48,6 +48,22 @@ export function createDatabasesController(svc) {
         data: await svc.liveBrowse(req.validated.params.id, { action: 'query', sql, db }, req.user),
       });
     },
+    async liveDump(req, res) {
+      const dump = await svc.liveDump(req.validated.params.id, req.validated.body ?? {}, req.user);
+      res.setHeader('Content-Type', dump.contentType || 'application/sql; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${dump.filename}"`);
+      res.setHeader('X-Dump-Size', String(dump.size));
+      res.setHeader('X-Dump-Engine', dump.engine);
+      if (dump.db) res.setHeader('X-Dump-Db', dump.db);
+      res.status(200).send(dump.bytes);
+    },
+    async liveRestore(req, res) {
+      const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? []);
+      const { db, confirm } = req.validated.query;
+      res.status(200).json({
+        data: await svc.liveRestore(req.validated.params.id, { db: db || null, bytes, confirm }, req.user),
+      });
+    },
     async create(req, res) {
       respond(res, await svc.create(req.validated.body, req.user), 201);
     },

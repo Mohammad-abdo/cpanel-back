@@ -81,3 +81,19 @@ export const instanceLiveQueryBodySchema = z
     db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
   })
   .strict();
+
+export const instanceDumpBodySchema = z
+  .object({
+    /** Omit or null = dump all databases on the instance. */
+    db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).nullable().optional(),
+  })
+  .strict();
+
+export const instanceRestoreQuerySchema = z
+  .object({
+    /** Target schema; omit for full-server dump restore. */
+    db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
+    /** Must equal the target db name, or ALL when restoring without db. */
+    confirm: z.string().min(1).max(64),
+  })
+  .strict();

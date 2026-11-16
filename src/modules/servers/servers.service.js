@@ -12,13 +12,41 @@ const AGENT_PUBLIC = { select: { id: true, agentPublicId: true, lastSeenAt: true
 const SSH_PUBLIC = { select: { host: true, port: true, username: true, lastConnectedAt: true } };
 const sshFor = (actor) => (actor?.isOwner ? { credential: SSH_PUBLIC } : {});
 
-/** A silent agent means the data is stale: report offline instead of the last known status. */
-function present(server, now) {
-  const { agent, snapshots, ...rest } = server;
+/** Agent silence → offline. SSH-only servers use the latest snapshot / last SSH connect instead. */
+const SSH_STALE_AFTER_MS = 15 * 60 * 1000;
+
+function present(server, nowMs) {
+  const { agent, snapshots, credential, ...rest } = server;
+  const snap = snapshots?.[0] ?? null;
+  const latest = snap?.summaryJson ?? null;
+  const agentSeen = agent?.lastSeenAt && !agent.revokedAt ? new Date(agent.lastSeenAt).getTime() : 0;
+  const snapSeen = snap?.capturedAt ? new Date(snap.capturedAt).getTime() : 0;
+  const sshSeen = credential?.lastConnectedAt ? new Date(credential.lastConnectedAt).getTime() : 0;
+  const lastReportMs = Math.max(agentSeen, snapSeen, credential ? sshSeen : 0) || null;
+
   let status = rest.status;
-  if (!agent || agent.revokedAt) status = 'unknown';
-  else if (!agent.lastSeenAt || now - new Date(agent.lastSeenAt).getTime() > STALE_AFTER_MS) status = 'offline';
-  return { ...rest, status, agent: agent ?? null, latest: snapshots?.[0]?.summaryJson ?? null };
+  if (agent && !agent.revokedAt) {
+    if (!agent.lastSeenAt || nowMs - new Date(agent.lastSeenAt).getTime() > STALE_AFTER_MS) status = 'offline';
+  } else if (credential) {
+    const fresh = lastReportMs && nowMs - lastReportMs <= SSH_STALE_AFTER_MS;
+    if (fresh) {
+      // Keep healthy/warning/critical/online from the last SSH snapshot when still fresh.
+      if (!status || status === 'unknown' || status === 'offline') status = 'online';
+    } else if (lastReportMs) status = 'offline';
+    else status = 'unknown';
+  } else {
+    status = 'unknown';
+  }
+
+  return {
+    ...rest,
+    status,
+    agent: agent ?? null,
+    credential: credential ?? undefined,
+    latest,
+    lastReportAt: lastReportMs ? new Date(lastReportMs).toISOString() : null,
+    metricsSource: agentSeen ? 'agent' : snapSeen || credential ? 'ssh' : null,
+  };
 }
 
 export function createServersService({ prisma, now = () => new Date(), auditService = null }) {

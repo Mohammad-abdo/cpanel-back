@@ -2,6 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import path from 'node:path';
 import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
+import { statusFromSummary } from '../agents/agents.service.js';
 import { execCommand, execScript, openSftp } from './ssh.connector.js';
 import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
 import { SITE_LIVE_SCRIPT, assertSafeSitePath, parseSiteLive } from './site-live.scan.js';
@@ -9,6 +10,8 @@ import {
   SAFE_ENGINE,
   assertSafeDbName,
   assertSafeIdent,
+  buildDumpCommand,
+  buildRestoreCommand,
   describeTableSql,
   filterSchemaNames,
   isMutatingSql,
@@ -25,6 +28,8 @@ import {
 const posix = path.posix;
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+/** Live SQL dump/restore transfer cap (panel download/upload via SSH). */
+export const MAX_DB_DUMP_BYTES = 80 * 1024 * 1024;
 export const MAX_RECURSIVE_DELETE = 5000;
 export const TICKET_TTL_MS = 30_000;
 export const SERVICE_NAME = /^[A-Za-z0-9@._-]{1,100}$/;
@@ -130,6 +135,50 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can use server SSH access');
   }
 
+  /** Persist SSH info as a ServerSnapshot so /servers list shows CPU/mem/disk without an agent. */
+  async function recordSshMetrics(serverId, info) {
+    const memPercent =
+      info?.memory?.total > 0 ? Math.round((Number(info.memory.used) / Number(info.memory.total)) * 100) : null;
+    const root = info?.disks?.find((d) => d.mount === '/') || info?.disks?.[0];
+    const diskPercent = root?.size > 0 ? Math.round((Number(root.used) / Number(root.size)) * 100) : null;
+    const cpus = Number(info?.cpus) || 0;
+    const load1 = info?.load?.m1;
+    const cpuPercent =
+      cpus > 0 && load1 != null && Number.isFinite(Number(load1))
+        ? Math.min(100, Math.round((Number(load1) / cpus) * 100))
+        : null;
+    const summary = {
+      cpuPercent,
+      memPercent,
+      diskPercent,
+      load1: load1 ?? null,
+      cpus: cpus || null,
+      source: 'ssh',
+      hostname: info?.hostname ?? null,
+      os: info?.os ?? null,
+    };
+    const capturedAt = now();
+    await prisma.serverSnapshot.create({
+      data: { serverId, capturedAt, summaryJson: summary },
+    });
+    const nums = [cpuPercent, memPercent, diskPercent].filter((n) => typeof n === 'number');
+    const status = nums.length ? statusFromSummary({
+      cpuPercent: cpuPercent ?? 0,
+      memPercent: memPercent ?? 0,
+      diskPercent: diskPercent ?? 0,
+    }) : 'online';
+    // Map agent vocabulary onto list-friendly online/degraded when needed.
+    const listStatus = status === 'healthy' ? 'online' : status === 'warning' || status === 'critical' ? 'degraded' : status;
+    await prisma.server.update({
+      where: { id: serverId },
+      data: {
+        status: listStatus,
+        ...(info?.hostname ? { hostname: info.hostname } : {}),
+      },
+    });
+    return summary;
+  }
+
   function withSshLock(serverId, task) {
     const prev = sshLocks.get(serverId) ?? Promise.resolve();
     const run = prev.catch(() => {}).then(task);
@@ -205,10 +254,28 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       encryptPassword('check'); // fail closed (no key) before touching the network
       if (await prisma.server.findUnique({ where: { alias: input.alias } })) throw new AppError(409, 'SERVER_ALIAS_TAKEN', 'A server with this name already exists');
       const info = await probe(input);
-      const server = await prisma.server.create({ data: { alias: input.alias, hostname: info.hostname ?? input.host } });
+      const server = await prisma.server.create({ data: { alias: input.alias, hostname: info.hostname ?? input.host, status: 'online' } });
       const cred = await prisma.serverCredential.create({
         data: { serverId: server.id, host: input.host, port: input.port, username: input.username, authType: 'password', secretEnc: encryptPassword(input.password), hostKeySha256: info.hostKeySha256, lastConnectedAt: now(), createdById: actor.id },
       });
+      // Seed list metrics immediately so /servers is not empty dashes for SSH-only hosts.
+      try {
+        const conn = await connector.connect({
+          host: input.host,
+          port: input.port,
+          username: input.username,
+          password: input.password,
+          expectedHostKey: info.hostKeySha256,
+        });
+        try {
+          const res = await execCommand(conn.client, INFO_SCRIPT, { maxBytes: 512 * 1024, timeoutMs: 30_000 });
+          if (!res.timedOut && res.code === 0) await recordSshMetrics(server.id, parseServerInfo(res.stdout));
+        } finally {
+          conn.client.end();
+        }
+      } catch {
+        /* metrics seed is best-effort; SSH login itself already succeeded */
+      }
       await audit({ actorId: actor.id, action: 'server.ssh.add', resourceId: server.id, result: 'success', after: { alias: input.alias, host: input.host, port: input.port, username: input.username, hostKeySha256: info.hostKeySha256 } });
       return { server, ssh: summary(cred), kernel: info.kernel };
     },
@@ -400,7 +467,9 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         try {
           const res = await execCommand(client, INFO_SCRIPT, { maxBytes: 512 * 1024, timeoutMs: 30_000 });
           if (res.timedOut) throw new AppError(504, 'SSH_INFO_TIMEOUT', 'Server info over SSH timed out');
-          return { ...parseServerInfo(res.stdout), collectedAt: now().toISOString() };
+          const parsed = parseServerInfo(res.stdout);
+          const summary = await recordSshMetrics(serverId, parsed);
+          return { ...parsed, collectedAt: now().toISOString(), summary };
         } finally {
           client.end();
         }
@@ -608,6 +677,135 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           throw new AppError(502, 'DB_LIVE_FAILED', err?.message || 'Database browse failed');
         } finally {
           client.end();
+        }
+      });
+    },
+
+    /**
+     * Dump one schema (or all databases) over SSH to a downloadable SQL buffer.
+     * MySQL requires saved DB login. Owner MFA only. Not the full TASK-023 restic pipeline.
+     */
+    async dbDump(serverId, { engine, db = null, auth = null }, actor) {
+      requireOwner(actor);
+      if (!SAFE_ENGINE.has(engine)) throw new AppError(422, 'DB_ENGINE_INVALID', 'Engine must be mysql or postgres');
+      if (db) assertSafeDbName(db);
+      if (engine === 'mysql' && !auth?.username) {
+        throw new AppError(409, 'DB_LOGIN_REQUIRED', 'Save a MySQL username/password on this instance before dumping');
+      }
+      const stamp = now().toISOString().replace(/[:.]/g, '-');
+      const scope = db || 'all';
+      const filename = `${engine}-${scope}-${stamp}.sql`;
+      const remotePath = `/tmp/nt-dump-${randomBytes(8).toString('hex')}.sql`;
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const login = auth?.username ? { username: auth.username, password: auth.password ?? '' } : null;
+          const cmd = buildDumpCommand(engine, { db, auth: login, outPath: remotePath });
+          const res = await execCommand(client, cmd, { maxBytes: 8 * 1024, timeoutMs: 300_000 });
+          if (res.timedOut) throw new AppError(504, 'DB_DUMP_TIMEOUT', 'Database dump timed out');
+          if (res.code !== 0) {
+            const hint = String(res.stderr || '')
+              .replace(/__NT_ERR__/g, '')
+              .trim()
+              .slice(0, 280);
+            throw new AppError(502, 'DB_DUMP_FAILED', hint ? `Dump failed: ${hint}` : 'Dump failed on the remote host');
+          }
+          const sftp = await openSftp(client);
+          try {
+            const st = await call((cb) => sftp.stat(remotePath, cb));
+            if (!st.size) throw new AppError(502, 'DB_DUMP_EMPTY', 'Dump file was empty');
+            if (st.size > MAX_DB_DUMP_BYTES) {
+              throw new AppError(413, 'DB_DUMP_TOO_LARGE', `Dump is larger than ${Math.floor(MAX_DB_DUMP_BYTES / (1024 * 1024))} MB; use an offsite backup policy instead`);
+            }
+            const bytes = await call((cb) => sftp.readFile(remotePath, cb));
+            await audit({
+              actorId: actor.id,
+              action: 'server.db.dump',
+              resourceId: serverId,
+              result: 'success',
+              after: { engine, db: db || null, size: bytes.length, sha256: sha(bytes), filename },
+            });
+            return { filename, contentType: 'application/sql; charset=utf-8', bytes, size: bytes.length, engine, db: db || null };
+          } finally {
+            await call((cb) => sftp.unlink(remotePath, cb)).catch(() => {});
+          }
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          if (err?.code === 'DB_LOGIN_REQUIRED' || err?.code === 'DB_NAME_INVALID' || err?.code === 'DB_USER_INVALID') {
+            throw new AppError(422, err.code, err.message);
+          }
+          throw new AppError(502, 'DB_DUMP_FAILED', err?.message || 'Database dump failed');
+        } finally {
+          try {
+            client.end();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+    },
+
+    /**
+     * Upload a SQL dump and restore it on the remote host. Destructive — Owner MFA + confirm token.
+     * confirm must equal the target db name, or "ALL" when restoring without a target db.
+     */
+    async dbRestore(serverId, { engine, db = null, auth = null, bytes, confirm }, actor) {
+      requireOwner(actor);
+      if (!SAFE_ENGINE.has(engine)) throw new AppError(422, 'DB_ENGINE_INVALID', 'Engine must be mysql or postgres');
+      if (db) assertSafeDbName(db);
+      const expected = db || 'ALL';
+      if (confirm !== expected) {
+        throw new AppError(422, 'CONFIRM_MISMATCH', `Type ${expected} to confirm restore`);
+      }
+      if (!Buffer.isBuffer(bytes) || bytes.length < 8) {
+        throw new AppError(422, 'DUMP_INVALID', 'Upload a non-empty .sql dump');
+      }
+      if (bytes.length > MAX_DB_DUMP_BYTES) {
+        throw new AppError(413, 'DB_DUMP_TOO_LARGE', `Uploads are limited to ${Math.floor(MAX_DB_DUMP_BYTES / (1024 * 1024))} MB`);
+      }
+      if (engine === 'mysql' && !auth?.username) {
+        throw new AppError(409, 'DB_LOGIN_REQUIRED', 'Save a MySQL username/password on this instance before restore');
+      }
+      const remotePath = `/tmp/nt-restore-${randomBytes(8).toString('hex')}.sql`;
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const sftp = await openSftp(client);
+          await call((cb) => sftp.writeFile(remotePath, bytes, cb));
+          const login = auth?.username ? { username: auth.username, password: auth.password ?? '' } : null;
+          const cmd = buildRestoreCommand(engine, { db, auth: login, inPath: remotePath });
+          const res = await execCommand(client, cmd, { maxBytes: 8 * 1024, timeoutMs: 300_000 });
+          await call((cb) => sftp.unlink(remotePath, cb)).catch(() => {});
+          if (res.timedOut) throw new AppError(504, 'DB_RESTORE_TIMEOUT', 'Database restore timed out');
+          if (res.code !== 0) {
+            const hint = String(res.stderr || '')
+              .replace(/__NT_ERR__/g, '')
+              .trim()
+              .slice(0, 280);
+            throw new AppError(502, 'DB_RESTORE_FAILED', hint ? `Restore failed: ${hint}` : 'Restore failed on the remote host');
+          }
+          await audit({
+            actorId: actor.id,
+            action: 'server.db.restore',
+            resourceId: serverId,
+            result: 'success',
+            after: { engine, db: db || null, size: bytes.length, sha256: sha(bytes) },
+          });
+          return { restored: true, engine, db: db || null, size: bytes.length };
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          if (err?.code === 'DB_LOGIN_REQUIRED' || err?.code === 'DB_NAME_INVALID' || err?.code === 'DB_USER_INVALID') {
+            throw new AppError(422, err.code, err.message);
+          }
+          throw new AppError(502, 'DB_RESTORE_FAILED', err?.message || 'Database restore failed');
+        } finally {
+          try {
+            client.end();
+          } catch {
+            /* ignore */
+          }
         }
       });
     },
