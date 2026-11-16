@@ -79,11 +79,27 @@ describe('domains: virtual host', () => {
     const first = await t.svc.applyVhost(DOMAIN_ID, { ...input, reason: 'launch', rollbackNote: 'restore previous' }, OWNER);
     await expect(t.svc.applyVhost(DOMAIN_ID, { ...input, approvalId: first.approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_NOT_APPROVED' });
   });
-  it('blocks self approval', async () => {
+  it('blocks non-Owner self approval', async () => {
     const t = setup();
     const first = await t.svc.applyVhost(DOMAIN_ID, { ...input, reason: 'launch', rollbackNote: 'restore previous' }, OWNER);
-    await expect(t.platform.decide(first.approval.id, { decision: 'approve' }, OWNER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
+    const own = await t.platform.request({ action: 'dns.change', resourceType: 'domain', resourceId: DOMAIN_ID, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, APPROVER);
+    await expect(t.platform.decide(own.id, { decision: 'approve' }, APPROVER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
     await expect(t.platform.decide(first.approval.id, { decision: 'approve' }, DEV)).rejects.toMatchObject({ status: 403 });
+  });
+  it('Owner self-approval succeeds, is audited selfApproved, single-use and bound to the change', async () => {
+    const t = setup();
+    const first = await t.svc.applyVhost(DOMAIN_ID, { ...input, reason: 'launch', rollbackNote: 'restore previous' }, OWNER);
+    await t.platform.decide(first.approval.id, { decision: 'approve' }, OWNER);
+    expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'approval.approve', metadata: expect.objectContaining({ selfApproved: true }) }));
+    await expect(t.svc.applyVhost(DOMAIN_ID, { ...input, upstreamPort: 4000, approvalId: first.approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
+    expect((await t.svc.applyVhost(DOMAIN_ID, { ...input, approvalId: first.approval.id }, OWNER)).applied).toBe(true);
+    await expect(t.svc.applyVhost(DOMAIN_ID, { ...input, approvalId: first.approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_CONSUMED' });
+  });
+  it('approvals list exposes selfApproved', async () => {
+    const t = setup();
+    t.prisma.approvalRequest.findMany = vi.fn(async () => [{ id: 'a', requesterId: OWNER.id, approverId: OWNER.id }, { id: 'b', requesterId: OWNER.id, approverId: APPROVER.id }, { id: 'c', requesterId: OWNER.id, approverId: null }]);
+    const rows = await t.platform.list({ limit: 10 }, OWNER);
+    expect(rows.map((r) => r.selfApproved)).toEqual([true, false, false]);
   });
   it('rejects invalid config before approval is even requested', async () => {
     const t = setup();

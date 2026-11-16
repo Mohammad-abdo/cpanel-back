@@ -84,12 +84,21 @@ describe('firewall: apply', () => {
     await expect(t.svc.preview(SERVER, { changes: [allow80] }, DEV)).rejects.toMatchObject({ status: 403 });
     await expect(t.svc.apply(SERVER, body(), null)).rejects.toMatchObject({ status: 401 });
   });
-  it('blocks self approval of a firewall change', async () => {
+  it('blocks non-Owner self approval of a firewall change', async () => {
     const t = fwSetup();
     const first = await t.svc.apply(SERVER, body(), OWNER);
-    await expect(t.platform.decide(first.approval.id, { decision: 'approve' }, OWNER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
+    const own = await t.platform.request({ action: 'dns.change', resourceType: 'server', resourceId: SERVER, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, APPROVER);
+    await expect(t.platform.decide(own.id, { decision: 'approve' }, APPROVER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
     await expect(t.svc.apply(SERVER, body({ approvalId: first.approval.id }), OWNER)).rejects.toMatchObject({ code: 'APPROVAL_NOT_APPROVED' });
-    void APPROVER;
+  });
+  it('Owner self-approval of a firewall change succeeds, is audited, single-use and bound to the change set', async () => {
+    const t = fwSetup();
+    const first = await t.svc.apply(SERVER, body(), OWNER);
+    await t.platform.decide(first.approval.id, { decision: 'approve' }, OWNER);
+    expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'approval.approve', metadata: expect.objectContaining({ selfApproved: true }) }));
+    await expect(t.svc.apply(SERVER, body({ changes: [{ ...allow80, port: 8080 }], approvalId: first.approval.id }), OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
+    expect((await t.svc.apply(SERVER, body({ approvalId: first.approval.id }), OWNER)).applied).toBe(true);
+    await expect(t.svc.apply(SERVER, body({ approvalId: first.approval.id }), OWNER)).rejects.toMatchObject({ code: 'APPROVAL_CONSUMED' });
   });
 });
 

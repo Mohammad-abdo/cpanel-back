@@ -1,5 +1,6 @@
 import { AppError } from '../../common/errors/app-error.js';
 import { hashPassword } from '../../common/crypto/password.js';
+import { checkMailboxPassword } from './mailboxes.validator.js';
 import { createMailAccess, guardSchema, mailDelegate } from '../../common/mail-support.js';
 
 /**
@@ -134,6 +135,8 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
     async create(input, actor) {
       const domain = await access.loadDomain(input.domainId, actor);
       await access.requireWrite(actor, domain);
+      const weak = checkMailboxPassword(input.password, input.localPart);
+      if (weak) throw new AppError(400, 'WEAK_PASSWORD', weak);
       const cfgD = mailDelegate(prisma, 'domainMailConfig');
       const cfg = await guardSchema(() => cfgD.findUnique({ where: { domainId: domain.id } }));
       if (!cfg?.enabled) throw new AppError(409, 'MAIL_DOMAIN_NOT_ENABLED', 'Enable mail for this domain first');
@@ -174,6 +177,8 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
     /** Never echoes the password or any hash; the audit/event records only that it changed. */
     async setPassword(id, { password }, actor) {
       const { mb, domain } = await mutableMailbox(id, actor);
+      const weak = checkMailboxPassword(password, mb.localPart);
+      if (weak) throw new AppError(400, 'WEAK_PASSWORD', weak);
       const row = await guardSchema(() =>
         mailDelegate(prisma, 'mailboxAccount').update({ where: { id }, data: { passwordHash: hashPassword(password), passwordSetAt: now(), provisioned: false } }),
       );

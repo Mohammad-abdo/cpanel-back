@@ -216,19 +216,31 @@ describe('approval separation of duties (platform routes)', () => {
       data: { status: 'pending', requesterId, resourceType: 'project', resourceId: randomUUID(), createdAt: new Date(), ...over },
     });
 
-  it('requester cannot approve their own request, even as Owner; a different Owner can', async () => {
+  it('a non-Owner requester cannot approve their own request; an Owner can approve their own (selfApproved) and others', async () => {
     const owner1 = await actor({ ownerFlag: true });
     const owner2 = await actor({ ownerFlag: true });
+    const member = await actor();
+    await prisma.resourceGrant.create({
+      data: { userId: member.user.id, permissionCode: 'platform.approval.decide', resourceType: 'platform', resourceId: 'platform', revokedAt: null, expiresAt: null, environmentId: null },
+    });
+    const own = await seedApproval(member.user.id);
+    const denied = await request(app).post(`/api/v1/platform/approvals/${own.id}/decision`).set(auth(member)).send({ decision: 'approve' });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error.code).toBe('SELF_APPROVAL_DENIED');
+    expect(prisma.approvalRequest.rows.find((r) => r.id === own.id).status).toBe('pending');
+
     const req = await seedApproval(owner1.user.id);
     const self = await request(app).post(`/api/v1/platform/approvals/${req.id}/decision`).set(auth(owner1)).send({ decision: 'approve' });
-    expect(self.status).toBe(403);
-    expect(self.body.error.code).toBe('SELF_APPROVAL_DENIED');
-    expect(prisma.approvalRequest.rows.find((r) => r.id === req.id).status).toBe('pending');
+    expect(self.status).toBe(200);
+    expect(self.body.data).toMatchObject({ status: 'approved', approverId: owner1.user.id });
+    const replayed = await request(app).post(`/api/v1/platform/approvals/${req.id}/decision`).set(auth(owner1)).send({ decision: 'approve' });
+    expect(replayed.status).toBe(409);
 
-    const ok = await request(app).post(`/api/v1/platform/approvals/${req.id}/decision`).set(auth(owner2)).send({ decision: 'approve', note: 'ok' });
+    const req2 = await seedApproval(owner1.user.id);
+    const ok = await request(app).post(`/api/v1/platform/approvals/${req2.id}/decision`).set(auth(owner2)).send({ decision: 'approve', note: 'ok' });
     expect(ok.status).toBe(200);
     expect(ok.body.data).toMatchObject({ status: 'approved', approverId: owner2.user.id });
-    const again = await request(app).post(`/api/v1/platform/approvals/${req.id}/decision`).set(auth(owner2)).send({ decision: 'approve' });
+    const again = await request(app).post(`/api/v1/platform/approvals/${req2.id}/decision`).set(auth(owner2)).send({ decision: 'approve' });
     expect(again.status).toBe(409);
   });
 

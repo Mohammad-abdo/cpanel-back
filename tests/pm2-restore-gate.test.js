@@ -79,11 +79,22 @@ describe('PM2 gate', () => {
     await expect(t.svc.pm2Control(randomUUID(), { name: 'shop-api', action: 'restart', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
     expect(t.ssh.connector.connect.mock.calls.length).toBe(calls);
   });
-  it('replaying before approval is APPROVAL_NOT_APPROVED; the requester cannot approve their own request', async () => {
+  it('replaying before approval is APPROVAL_NOT_APPROVED; a non-Owner requester cannot approve their own request', async () => {
     const t = await setup();
     const { approval } = await t.svc.pm2Control(t.serverId, { name: 'shop-api', action: 'stop', ...WHY }, OWNER);
     await expect(t.svc.pm2Control(t.serverId, { name: 'shop-api', action: 'stop', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_NOT_APPROVED' });
-    await expect(t.ctx.platform.decide(approval.id, { decision: 'approve' }, OWNER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
+    const own = await t.ctx.platform.request({ action: 'dns.change', resourceType: 'server', resourceId: t.serverId, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, APPROVER);
+    await expect(t.ctx.platform.decide(own.id, { decision: 'approve' }, APPROVER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
+  });
+  it('Owner self-approval replays once, is audited selfApproved, bound to action/process, then APPROVAL_CONSUMED', async () => {
+    const t = await setup();
+    const { approval } = await t.svc.pm2Control(t.serverId, { name: 'shop-api', action: 'stop', ...WHY }, OWNER);
+    await t.ctx.platform.decide(approval.id, { decision: 'approve' }, OWNER);
+    expect(t.ctx.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'approval.approve', metadata: expect.objectContaining({ selfApproved: true }) }));
+    await expect(t.svc.pm2Control(t.serverId, { name: 'shop-api', action: 'restart', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
+    await expect(t.svc.pm2Control(t.serverId, { name: 'worker', action: 'stop', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
+    expect(await t.svc.pm2Control(t.serverId, { name: 'shop-api', action: 'stop', approvalId: approval.id }, OWNER)).toMatchObject({ ok: true, action: 'stop' });
+    await expect(t.svc.pm2Control(t.serverId, { name: 'shop-api', action: 'stop', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_CONSUMED' });
   });
   it('start, logs and describe are not gated', async () => {
     const t = await setup();
@@ -140,11 +151,22 @@ describe('live DB restore gate', () => {
     await expect(t.svc.liveRestore(INSTANCE, { db: 'other_db', bytes: DUMP, confirm: 'other_db', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
     expect(t.serverAccessService.dbRestore).not.toHaveBeenCalled();
   });
-  it('self-approval is denied and an unapproved replay is refused', async () => {
+  it('non-Owner self-approval is denied and an unapproved replay is refused', async () => {
     const t = setup();
     const { approval } = await t.svc.liveRestore(INSTANCE, input(), OWNER);
-    await expect(t.ctx.platform.decide(approval.id, { decision: 'approve' }, OWNER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
+    const own = await t.ctx.platform.request({ action: 'dns.change', resourceType: 'database_instance', resourceId: INSTANCE, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, APPROVER);
+    await expect(t.ctx.platform.decide(own.id, { decision: 'approve' }, APPROVER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
     await expect(t.svc.liveRestore(INSTANCE, { db: 'shop_db', bytes: DUMP, confirm: 'shop_db', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_NOT_APPROVED' });
+  });
+  it('Owner self-approval restores once, is audited selfApproved, bound to dump/target, then APPROVAL_CONSUMED', async () => {
+    const t = setup();
+    const { approval } = await t.svc.liveRestore(INSTANCE, input(), OWNER);
+    await t.ctx.platform.decide(approval.id, { decision: 'approve' }, OWNER);
+    expect(t.ctx.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'approval.approve', metadata: expect.objectContaining({ selfApproved: true }) }));
+    await expect(t.svc.liveRestore(INSTANCE, { db: 'other_db', bytes: DUMP, confirm: 'other_db', approvalId: approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
+    const replay = { db: 'shop_db', bytes: DUMP, confirm: 'shop_db', approvalId: approval.id };
+    expect(await t.svc.liveRestore(INSTANCE, replay, OWNER)).toEqual({ restored: true });
+    await expect(t.svc.liveRestore(INSTANCE, replay, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_CONSUMED' });
   });
   it('non-owners are refused before the gate', async () => {
     const t = setup();

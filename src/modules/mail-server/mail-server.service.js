@@ -62,6 +62,14 @@ export function createMailServerService({ prisma, now = () => new Date(), auditS
     if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can manage the server mail service');
   };
 
+  /** Enable/disable record intent only: Owner or the dedicated `mail.manage` permission granted on the server. Apply/firewall/probe stay Owner-only. */
+  const manageServer = async (actor, serverId) => {
+    if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+    if (actor.isOwner) return;
+    if (rbac?.can && (await rbac.can(actor, { permissionKey: 'mail.manage', resourceType: 'server', resourceId: serverId }))) return;
+    throw new AppError(403, 'OWNER_ONLY', 'Only the Owner or a holder of mail.manage can manage the server mail service');
+  };
+
   const view = (server, row, domainsEnabled) => ({
     serverId: server.id,
     serverAlias: server.alias,
@@ -106,7 +114,7 @@ export function createMailServerService({ prisma, now = () => new Date(), auditS
 
     /** Records intent only. Never installs or configures anything. */
     async enable(serverId, { mailHostname }, actor) {
-      ownerOnly(actor);
+      await manageServer(actor, serverId);
       const server = await access.requireServerVisible(actor, serverId);
       const d = mailDelegate(prisma, 'serverMailService');
       const row = await guardSchema(() =>
@@ -121,7 +129,7 @@ export function createMailServerService({ prisma, now = () => new Date(), auditS
     },
 
     async disable(serverId, { reason }, actor) {
-      ownerOnly(actor);
+      await manageServer(actor, serverId);
       const server = await access.requireServerVisible(actor, serverId);
       const d = mailDelegate(prisma, 'serverMailService');
       const existing = await guardSchema(() => d.findUnique({ where: { serverId } }));

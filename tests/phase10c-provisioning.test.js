@@ -127,15 +127,33 @@ describe('provision apply: approval flow', () => {
     expect(t.getRow().lastHealthJson.provision.steps.length).toBeGreaterThan(5);
     expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'mail.provision.apply', result: 'success' }));
   });
-  it('self-approval is denied and the replay is bound to the server/host', async () => {
+  it('non-Owner self-approval is denied; the replay is bound to the server/host', async () => {
     const ssh = fakeSsh(defaultReply);
     const t = setup({ ssh });
     const base = { mailHostname: 'mail.example.com', confirmAlias: 'lab-1', reason: 'owner rollout' };
     const first = await t.server.applyProvision(SERVER, base, OWNER);
-    await expect(t.platform.decide(first.approval.id, { decision: 'approve' }, OWNER)).rejects.toBeTruthy();
+    const own = await t.platform.request({ action: 'dns.change', resourceType: 'domain', resourceId: DOMAIN, reason: 'because', impact: ['x'], rollbackPlan: 'undo' }, APPROVER);
+    await expect(t.platform.decide(own.id, { decision: 'approve' }, APPROVER)).rejects.toMatchObject({ code: 'SELF_APPROVAL_DENIED' });
     await t.platform.decide(first.approval.id, { decision: 'approve' }, APPROVER);
-    await expect(t.server.applyProvision(SERVER, { ...base, mailHostname: 'other.example.com', approvalId: first.approval.id }, OWNER)).rejects.toBeTruthy();
+    await expect(t.server.applyProvision(SERVER, { ...base, mailHostname: 'other.example.com', approvalId: first.approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
     expect(ssh.calls).toHaveLength(0);
+  });
+  it('Owner self-approval succeeds, is audited selfApproved, single-use and bound to the host', async () => {
+    const ssh = fakeSsh(defaultReply);
+    const t = setup({ ssh });
+    const base = { mailHostname: 'mail.example.com', confirmAlias: 'lab-1', reason: 'owner rollout' };
+    const first = await t.server.applyProvision(SERVER, base, OWNER);
+    const decided = await t.platform.decide(first.approval.id, { decision: 'approve' }, OWNER);
+    expect(decided).toMatchObject({ status: 'approved', approverId: OWNER.id });
+    expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'approval.approve', metadata: expect.objectContaining({ selfApproved: true }) }));
+    await expect(t.server.applyProvision(SERVER, { ...base, mailHostname: 'other.example.com', approvalId: first.approval.id }, OWNER)).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
+    const res = await t.server.applyProvision(SERVER, { ...base, approvalId: first.approval.id }, OWNER);
+    expect(res).toMatchObject({ ok: true });
+    const callsAfter = ssh.calls.length;
+    // Single-use: the second replay never re-executes; provisioning maps APPROVAL_CONSUMED on a provisioned server to alreadyDone.
+    expect(await t.server.applyProvision(SERVER, { ...base, approvalId: first.approval.id }, OWNER)).toMatchObject({ alreadyDone: true });
+    expect(ssh.calls.length).toBe(callsAfter);
+    expect(t.getRow().status).toBe('enabled');
   });
   it('stops on the first failing step and reports which one', async () => {
     const ssh = fakeSsh((script) => (script === S.stepScript('dovecot') ? { code: 1, stdout: '', stderr: 'doveconf: Fatal' } : defaultReply(script)));

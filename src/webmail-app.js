@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { errorHandler, notFound } from './common/middleware/error-handler.js';
 import { webmailAuthRouter } from './modules/webmail-auth/webmail-auth.routes.js';
-import { webmailMailRouter } from './modules/webmail-mail/webmail-mail.routes.js';
+import { WEBMAIL_LARGE_BODY_PATHS, webmailMailRouter } from './modules/webmail-mail/webmail-mail.routes.js';
 import { jsonReplacer } from './app.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,7 +45,8 @@ export function createWebmailApp() {
     res.set('X-Content-Type-Options', 'nosniff');
     next();
   });
-  app.use(express.json({ limit: '2mb' }));
+  // Send/draft routes parse their own larger body (attachments) after the session check.
+  app.use(express.json({ limit: '2mb', type: (req) => !WEBMAIL_LARGE_BODY_PATHS.includes(req.path) && /json/i.test(req.headers['content-type'] || '') }));
 
   app.get('/wm/v1/health', (_req, res) => {
     res.status(200).json({ data: { ok: true, service: 'webmail' } });
@@ -56,7 +57,7 @@ export function createWebmailApp() {
 
   if (existsSync(spaDir)) {
     app.use(express.static(spaDir, { index: false, maxAge: '1h' }));
-    app.get(/^(?!\/wm\/).*/, (_req, res) => {
+    app.get(/^(?!\/(wm|api)\/).*/, (_req, res) => {
       res.sendFile(join(spaDir, 'index.html'));
     });
   } else {

@@ -30,6 +30,7 @@
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "imapflow": "^2.12.1",
+    "mailparser": "3.7.1",
     "nodemailer": "^10.6.0",
     "ssh2": "^1.17.0",
     "ws": "^8.23.0",

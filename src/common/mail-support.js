@@ -47,10 +47,19 @@ export function createMailAccess({ prisma, rbac = null, now = () => new Date() }
     return row;
   }
 
-  /** Writes: Owner, or project.configure on any environment of the domain project. Everyone else is denied. */
+  /**
+   * Writes: Owner, or the dedicated `mail.manage` permission (grant on the domain, or on its project, or a role),
+   * or (backward compatible) project.configure on any environment of the domain project. Everyone else is denied.
+   */
   async function requireWrite(actor, domain) {
     if (actor?.isOwner) return;
     if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+    if (rbac?.can) {
+      const scopes = [{ resourceType: 'domain', resourceId: domain.id }];
+      if (domain.projectId) scopes.push({ resourceType: 'project', resourceId: domain.projectId });
+      if (domain.serverId) scopes.push({ resourceType: 'server', resourceId: domain.serverId });
+      for (const sc of scopes) if (await rbac.can(actor, { permissionKey: 'mail.manage', ...sc })) return;
+    }
     if (domain.projectId && rbac?.can) {
       const envs = (await prisma.projectEnvironment?.findMany?.({ where: { projectId: domain.projectId } })) ?? [];
       for (const env of envs) {

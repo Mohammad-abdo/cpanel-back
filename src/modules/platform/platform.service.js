@@ -126,7 +126,7 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
         resourceType: row.resourceType,
         resourceId: row.resourceId,
         result: 'success',
-        metadata: { approvalId: id, note: note ?? null, selfApproval: row.requesterId === actor.id },
+        metadata: { approvalId: id, note: note ?? null, selfApproval: row.requesterId === actor.id, ...(row.requesterId === actor.id ? { selfApproved: true } : {}) },
       });
       return updated;
     },
@@ -135,7 +135,8 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
       await assertCan(rbac, actor, { permissionKey: PERM.APPROVAL_DECIDE, resourceType: "platform", resourceId: "platform", environmentId: null });
       // Platform approvals only: operation approvals (operationJobId set, status PENDING/APPROVED in upper case)
       // live in the same table, and MySQL's case-insensitive collation would otherwise match them too.
-      return prisma.approvalRequest.findMany({ where: { operationJobId: null, ...(status ? { status } : {}) }, take: limit, orderBy: { createdAt: 'desc' } });
+      const rows = await prisma.approvalRequest.findMany({ where: { operationJobId: null, ...(status ? { status } : {}) }, take: limit, orderBy: { createdAt: 'desc' } });
+      return rows.map((r) => ({ ...r, selfApproved: Boolean(r.approverId) && r.approverId === r.requesterId }));
     },
   };
 }

@@ -2,9 +2,9 @@ import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { AppError } from './errors/app-error.js';
 import { openMailForwards } from './webmail-ssh-tunnel.js';
+import { MAX_SOURCE, assertFlags, buildMessage, groupThreads, parseSource } from './webmail-mime.js';
 
 const MAX_LIST = 100;
-const MAX_BODY = 2_000_000;
 
 /** Direct IMAP/SMTP endpoints (public host). Prefer SSH tunnel for panel-hosted webmail. */
 export function mailEndpoints(host, { port, tlsInsecure = false } = {}) {
@@ -224,8 +224,18 @@ function mapListedMessage(msg) {
     flags: [...(msg.flags || [])],
     seen: msg.flags?.has('\\Seen') ?? false,
     size: msg.size ?? null,
+    messageId: msg.envelope?.messageId || null,
+    inReplyTo: msg.envelope?.inReplyTo || null,
+    references: parseRefs(msg.headers),
   };
 }
+
+function parseRefs(headers) {
+  const raw = headers ? headers.toString('utf8') : '';
+  return (raw.match(/<[^<>\s]+>/g) || []).slice(0, 50);
+}
+
+const LIST_FETCH = { envelope: true, flags: true, uid: true, size: true, headers: ['references'] };
 
 export async function listMessages(ctx, { folder = 'INBOX', limit = 50, page = 1, q = '' }) {
   const take = Math.min(Math.max(Number(limit) || 50, 1), MAX_LIST);
@@ -249,11 +259,11 @@ export async function listMessages(ctx, { folder = 'INBOX', limit = 50, page = 1
         const slice = sorted.slice(start, start + take);
         if (!slice.length) return { folder, total, page: pageNum, limit: take, q: query, items: [] };
         const items = [];
-        for await (const msg of client.fetch(slice, { envelope: true, flags: true, uid: true, size: true }, { uid: true })) {
+        for await (const msg of client.fetch(slice, LIST_FETCH, { uid: true })) {
           items.push(mapListedMessage(msg));
         }
         items.sort((a, b) => b.uid - a.uid);
-        return { folder, total, page: pageNum, limit: take, q: query, items };
+        return { folder, total, page: pageNum, limit: take, q: query, items: groupThreads(items) };
       }
 
       const total = client.mailbox.exists || 0;
@@ -261,11 +271,11 @@ export async function listMessages(ctx, { folder = 'INBOX', limit = 50, page = 1
       const end = Math.max(total - (pageNum - 1) * take, 1);
       const start = Math.max(end - take + 1, 1);
       const items = [];
-      for await (const msg of client.fetch(`${start}:${end}`, { envelope: true, flags: true, uid: true, size: true })) {
+      for await (const msg of client.fetch(`${start}:${end}`, LIST_FETCH)) {
         items.push(mapListedMessage(msg));
       }
       items.reverse();
-      return { folder, total, page: pageNum, limit: take, q: '', items };
+      return { folder, total, page: pageNum, limit: take, q: '', items: groupThreads(items) };
     } finally {
       lock.release();
     }
@@ -346,51 +356,113 @@ export async function actionMessages(ctx, { folder = 'INBOX', uids, action, targ
   });
 }
 
-export async function getMessage(ctx, { folder = 'INBOX', uid }) {
+function checkUid(uid) {
   const id = Number(uid);
-  if (!Number.isFinite(id) || id < 1) throw new AppError(422, 'INVALID_UID', 'Invalid message id');
+  if (!Number.isInteger(id) || id < 1) throw new AppError(422, 'INVALID_UID', 'Invalid message id');
+  return id;
+}
+
+async function fetchSource(client, id) {
+  let source = null;
+  for await (const msg of client.fetch(String(id), { uid: true, flags: true, source: { maxLength: MAX_SOURCE } }, { uid: true })) {
+    source = { buf: msg.source, flags: [...(msg.flags || [])], uid: msg.uid };
+  }
+  if (!source || !source.buf) throw new AppError(404, 'MESSAGE_NOT_FOUND', 'Message not found');
+  return source;
+}
+
+/** Decoded message: text + raw HTML (client sanitizes), attachment metadata, threading headers. */
+export async function getMessage(ctx, { folder = 'INBOX', uid, markSeen = true }) {
+  const id = checkUid(uid);
   return withImap(ctx, async (client) => {
     const lock = await client.getMailboxLock(folder);
     try {
-      let found = null;
-      for await (const msg of client.fetch(String(id), { uid: true, envelope: true, flags: true, source: { maxLength: MAX_BODY } }, { uid: true })) {
-        const source = msg.source ? msg.source.toString('utf8').slice(0, MAX_BODY) : '';
-        const textMatch = source.match(/\r?\n\r?\n([\s\S]*)$/);
-        found = {
-          uid: msg.uid,
-          subject: msg.envelope?.subject || '(no subject)',
-          from: decodeAddressList(msg.envelope?.from),
-          to: decodeAddressList(msg.envelope?.to),
-          cc: decodeAddressList(msg.envelope?.cc),
-          date: msg.envelope?.date ? new Date(msg.envelope.date).toISOString() : null,
-          flags: [...(msg.flags || [])],
-          bodyText: (textMatch?.[1] || source).slice(0, MAX_BODY),
-          truncated: Boolean(msg.source && msg.source.length >= MAX_BODY),
-        };
+      const src = await fetchSource(client, id);
+      const p = await parseSource(src.buf);
+      if (markSeen && !src.flags.includes('\\Seen')) {
+        try {
+          await client.messageFlagsAdd({ uid: id }, ['\\Seen'], { uid: true });
+          src.flags.push('\\Seen');
+        } catch {
+          /* non-fatal */
+        }
       }
-      if (!found) throw new AppError(404, 'MESSAGE_NOT_FOUND', 'Message not found');
-      try {
-        await client.messageFlagsAdd({ uid: id }, ['\\Seen'], { uid: true });
-      } catch {
-        /* non-fatal */
-      }
-      return found;
+      const { attachments, ...rest } = p;
+      return {
+        uid: id,
+        ...rest,
+        subject: rest.subject || '(no subject)',
+        flags: src.flags,
+        truncated: src.buf.length >= MAX_SOURCE,
+        attachments: attachments.map(({ content, ...meta }) => meta),
+      };
     } finally {
       lock.release();
     }
   });
 }
 
-export async function sendMessage(ctx, { to, subject, text, cc }) {
-  const recipients = String(to || '')
-    .split(/[,;]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!recipients.length) throw new AppError(422, 'TO_REQUIRED', 'At least one recipient is required');
-  if (recipients.length > 50) throw new AppError(422, 'TOO_MANY_RECIPIENTS', 'Too many recipients');
-  const body = String(text || '');
-  if (body.length > MAX_BODY) throw new AppError(413, 'BODY_TOO_LARGE', 'Message body is too large');
-  const subj = String(subject || '').slice(0, 998) || '(no subject)';
+/** One attachment's bytes by index within a message of the caller's own mailbox. */
+export async function getAttachment(ctx, { folder = 'INBOX', uid, index }) {
+  const id = checkUid(uid);
+  const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0) throw new AppError(422, 'INVALID_ATTACHMENT', 'Invalid attachment');
+  return withImap(ctx, async (client) => {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      const src = await fetchSource(client, id);
+      const p = await parseSource(src.buf);
+      const att = p.attachments[idx];
+      if (!att) throw new AppError(404, 'ATTACHMENT_NOT_FOUND', 'Attachment not found');
+      return { filename: att.filename, contentType: att.contentType, content: att.content };
+    } finally {
+      lock.release();
+    }
+  });
+}
+
+/** Add/remove \Seen and \Flagged only. */
+export async function setFlags(ctx, { folder = 'INBOX', uids, add = [], remove = [] }) {
+  const idList = normalizeUids(uids);
+  const toAdd = assertFlags(add);
+  const toRemove = assertFlags(remove);
+  if (toAdd.some((f) => toRemove.includes(f))) throw new AppError(422, 'FLAG_CONFLICT', 'Flag cannot be added and removed');
+  if (!toAdd.length && !toRemove.length) throw new AppError(422, 'FLAGS_REQUIRED', 'No flags given');
+  return withImap(ctx, async (client) => {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      if (toAdd.length) await client.messageFlagsAdd(idList, toAdd, { uid: true });
+      if (toRemove.length) await client.messageFlagsRemove(idList, toRemove, { uid: true });
+      return { folder, uids: idList, added: toAdd, removed: toRemove };
+    } finally {
+      lock.release();
+    }
+  });
+}
+
+/** Save (or replace) a server-side draft in Drafts via IMAP APPEND. Bcc is stored in the draft copy only. */
+export async function saveDraft(ctx, body) {
+  const built = await buildMessage({ from: ctx.address, draft: true, ...body });
+  return withImap(ctx, async (client) => {
+    const path = await resolveRolePath(client, 'drafts');
+    const res = await client.append(path, built.raw, ['\\Draft', '\\Seen']);
+    const replace = body.replaceUid ? Number(body.replaceUid) : null;
+    if (replace && Number.isInteger(replace) && replace > 0) {
+      const lock = await client.getMailboxLock(path);
+      try {
+        await client.messageDelete([replace], { uid: true });
+      } catch {
+        /* non-fatal: old draft may be gone */
+      } finally {
+        lock.release();
+      }
+    }
+    return { folder: path, uid: res?.uid ?? null, saved: true };
+  });
+}
+
+export async function sendMessage(ctx, body) {
+  const built = await buildMessage({ from: ctx.address, ...body });
   const transport = nodemailer.createTransport({
     host: ctx.host,
     port: ctx.smtpPort ?? 465,
@@ -400,12 +472,10 @@ export async function sendMessage(ctx, { to, subject, text, cc }) {
   });
   let info;
   try {
+    // The envelope carries Bcc recipients; the raw message headers never include Bcc.
     info = await transport.sendMail({
-      from: ctx.address,
-      to: recipients.join(', '),
-      ...(cc ? { cc } : {}),
-      subject: subj,
-      text: body,
+      envelope: { from: ctx.address, to: [...built.to, ...built.cc, ...built.bcc] },
+      raw: built.raw,
     });
   } catch (err) {
     const msg = String(err?.message || '');
@@ -420,27 +490,12 @@ export async function sendMessage(ctx, { to, subject, text, cc }) {
   try {
     await withImap(ctx, async (client) => {
       const sentPath = await resolveRolePath(client, 'sent');
-      const raw =
-        info?.message ||
-        [
-          `From: ${ctx.address}`,
-          `To: ${recipients.join(', ')}`,
-          cc ? `Cc: ${cc}` : null,
-          `Subject: ${subj}`,
-          `Date: ${new Date().toUTCString()}`,
-          'MIME-Version: 1.0',
-          'Content-Type: text/plain; charset=utf-8',
-          '',
-          body,
-        ]
-          .filter((line) => line != null)
-          .join('\r\n');
-      await client.append(sentPath, raw, ['\\Seen']);
+      await client.append(sentPath, built.raw, ['\\Seen']);
       savedToSent = true;
     });
   } catch {
-    /* non-fatal — SMTP already succeeded */
+    /* non-fatal: SMTP already succeeded */
   }
 
-  return { messageId: info.messageId || null, accepted: info.accepted || recipients, savedToSent };
+  return { messageId: info?.messageId || null, accepted: info?.accepted || built.to, savedToSent };
 }

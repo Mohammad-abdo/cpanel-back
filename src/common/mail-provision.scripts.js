@@ -43,7 +43,7 @@ const STEP_SCRIPTS = {
     'echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections',
     'echo "postfix postfix/mailname string $1" | debconf-set-selections',
     'apt-get update -y',
-    'apt-get install -y postfix dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve dovecot-managesieved opendkim opendkim-tools rspamd openssl ca-certificates',
+    'apt-get install -y postfix dovecot-core dovecot-imapd dovecot-lmtpd dovecot-sieve dovecot-managesieved opendkim opendkim-tools rspamd fail2ban openssl ca-certificates',
     'id vmail >/dev/null 2>&1 || { groupadd -g 5000 vmail; useradd -g vmail -u 5000 -d /var/vmail -m -s /usr/sbin/nologin vmail; }',
     'mkdir -p /var/vmail && chown -R vmail:vmail /var/vmail && chmod 0750 /var/vmail',
     'echo "NT_RESULT stack_version=postfix:$(dpkg-query -W -f=\'${Version}\' postfix),dovecot:$(dpkg-query -W -f=\'${Version}\' dovecot-core)"',
@@ -180,6 +180,72 @@ const STEP_SCRIPTS = {
     "printf 'enabled = false;\\n' > /etc/rspamd/local.d/dkim_signing.conf",
   ),
 
+  // Phase 10F (TASK-038): abuse controls. Fixed text, no dynamic values, no secrets. Every file is rewritten whole
+  // (marker NT-HARDENING-v1) and postconf -e is idempotent, so re-running changes nothing.
+  hardening: lines(
+    // 1) Postfix anvil rate limits (per client, per anvil_rate_time_unit).
+    'postconf -e "anvil_rate_time_unit = 60s" "smtpd_client_message_rate_limit = 100" "smtpd_client_recipient_rate_limit = 200" "smtpd_client_connection_rate_limit = 30" "smtpd_client_connection_count_limit = 20" "smtpd_client_auth_rate_limit = 20"',
+    'postconf -e "smtpd_error_sleep_time = 1s" "smtpd_soft_error_limit = 3" "smtpd_hard_error_limit = 10"',
+    'postfix check',
+    // 2) Dovecot: delay failed auth replies, cap parallel IMAP sessions per user+IP.
+    "cat > /etc/dovecot/conf.d/98-nt-mail-hardening.conf <<'NTEOF'",
+    '# NT-HARDENING-v1 Managed by NodeTeam panel. Do not edit by hand.',
+    'auth_failure_delay = 2 secs',
+    'auth_verbose = no',
+    'protocol imap {',
+    '  mail_max_userip_connections = 20',
+    '}',
+    'NTEOF',
+    'doveconf -n >/dev/null',
+    // 3) Rspamd baseline (scoring actions, headers, local-only controller).
+    'mkdir -p /etc/rspamd/local.d',
+    "cat > /etc/rspamd/local.d/actions.conf <<'NTEOF'",
+    '# NT-HARDENING-v1 Managed by NodeTeam panel.',
+    'reject = 15;',
+    'add_header = 6;',
+    'greylist = 4;',
+    'NTEOF',
+    "cat > /etc/rspamd/local.d/milter_headers.conf <<'NTEOF'",
+    '# NT-HARDENING-v1 Managed by NodeTeam panel.',
+    'extended_spam_headers = true;',
+    'use = ["x-spamd-result", "x-rspamd-server", "authentication-results"];',
+    'NTEOF',
+    "cat > /etc/rspamd/local.d/worker-controller.inc <<'NTEOF'",
+    '# NT-HARDENING-v1 Managed by NodeTeam panel. Controller listens on loopback only.',
+    'bind_socket = "127.0.0.1:11334";',
+    'NTEOF',
+    "cat > /etc/rspamd/local.d/classifier-bayes.conf <<'NTEOF'",
+    '# NT-HARDENING-v1 Managed by NodeTeam panel.',
+    'autolearn = true;',
+    'NTEOF',
+    // 4) fail2ban jails: postfix, postfix-sasl, dovecot (journald backend; Ubuntu 24.04 has no mail.log by default).
+    'mkdir -p /etc/fail2ban/jail.d',
+    "cat > /etc/fail2ban/jail.d/nt-mail.local <<'NTEOF'",
+    '# NT-HARDENING-v1 Managed by NodeTeam panel. Do not edit by hand.',
+    '[DEFAULT]',
+    'ignoreip = 127.0.0.1/8 ::1',
+    'bantime = 1h',
+    'findtime = 10m',
+    'maxretry = 5',
+    'backend = systemd',
+    '',
+    '[postfix]',
+    'enabled = true',
+    'port = smtp,465,submission',
+    '',
+    '[postfix-sasl]',
+    'enabled = true',
+    'port = smtp,465,submission,imap,imaps',
+    'maxretry = 4',
+    '',
+    '[dovecot]',
+    'enabled = true',
+    'port = pop3,pop3s,imap,imaps,submission,465,sieve',
+    'NTEOF',
+    'fail2ban-client -t >/dev/null',
+    'echo "NT_RESULT hardening=applied"',
+  ),
+
   // $1 = mail hostname. Prefer Let's Encrypt for the mail host, then the parent apex
   // (mail.example.com → example.com), else a flagged self-signed placeholder.
   tls: lines(
@@ -207,11 +273,11 @@ const STEP_SCRIPTS = {
   ),
 
   services: lines(
-    'systemctl enable postfix dovecot opendkim rspamd >/dev/null 2>&1 || true',
+    'systemctl enable postfix dovecot opendkim rspamd fail2ban >/dev/null 2>&1 || true',
     'mkdir -p /run/opendkim; chown opendkim:opendkim /run/opendkim 2>/dev/null || true',
     // Restart one-by-one. A single `systemctl restart a b c` waits on the slowest unit and
     // OpenDKIM often hits the default start timeout when SOCKET defaults disagree.
-    'for s in opendkim rspamd dovecot postfix; do',
+    'for s in opendkim rspamd dovecot postfix fail2ban; do',
     '  systemctl reset-failed "$s" >/dev/null 2>&1 || true',
     '  if ! systemctl restart "$s"; then',
     '    echo "restart failed: $s" >&2',
@@ -235,7 +301,7 @@ const STEP_SCRIPTS = {
 };
 
 /** Ordered executable steps. The firewall is intentionally NOT part of apply (separate CRITICAL action). */
-export const PROVISION_STEP_ORDER = Object.freeze(['packages', 'postfix', 'dovecot', 'opendkim', 'rspamd', 'tls', 'services']);
+export const PROVISION_STEP_ORDER = Object.freeze(['packages', 'postfix', 'dovecot', 'opendkim', 'rspamd', 'tls', 'hardening', 'services']);
 
 export function stepScript(id) {
   const s = STEP_SCRIPTS[id];
@@ -316,7 +382,12 @@ export const firewallStatusScript = () =>
 /** Health probe incl. open-relay self-test from the server's non-loopback address (loopback is not a relay client). */
 export const healthScript = () =>
   lines(
-    'for s in postfix dovecot opendkim rspamd; do echo "svc_$s=$(systemctl is-active "$s" 2>/dev/null || true)"; done',
+    'for s in postfix dovecot opendkim rspamd fail2ban; do echo "svc_$s=$(systemctl is-active "$s" 2>/dev/null || true)"; done',
+    `echo "f2b_jails=$(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{gsub(/[[:space:]]/,"",$2); gsub(/,/,"+",$2); print $2}' || true)"`,
+    'cert=/etc/ssl/nt-mail/fullchain.pem; days=unknown',
+    'if [ -s "$cert" ]; then end=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2 || true); if [ -n "$end" ]; then e=$(date -d "$end" +%s 2>/dev/null || echo 0); [ "$e" -gt 0 ] && days=$(( (e - $(date +%s)) / 86400 )); fi; fi',
+    'echo "tls_days_left=$days"',
+    `echo "queue_size=$(mailq 2>/dev/null | awk '/^Mail queue is empty/{n=0;f=1} /^-- .* Requests?[.]/{n=$5;f=1} END{print f?n:"unknown"}' || echo unknown)"`,
     'for p in 25 465 587 993; do if ss -ltnH 2>/dev/null | awk -v p=":$p" \'$4 ~ p"$" {f=1} END{exit !f}\'; then echo "port_$p=up"; else echo "port_$p=down"; fi; done',
     'if [ -L /etc/ssl/nt-mail/fullchain.pem ]; then echo "tls=existing"; elif [ -s /etc/ssl/nt-mail/fullchain.pem ]; then echo "tls=selfsigned-placeholder"; else echo "tls=missing"; fi',
     'ip=$(hostname -I 2>/dev/null | awk \'{print $1}\'); ip=${ip:-127.0.0.1}',
@@ -365,6 +436,22 @@ export function evaluateHealth(kv) {
   for (const s of ['postfix', 'dovecot', 'opendkim', 'rspamd']) checks.push({ id: `service.${s}`, pass: kv[`svc_${s}`] === 'active', detail: kv[`svc_${s}`] ?? 'unknown' });
   for (const p of MAIL_FIREWALL_PORTS) checks.push({ id: `port.${p}`, pass: kv[`port_${p}`] === 'up', detail: kv[`port_${p}`] ?? 'unknown' });
   checks.push({ id: 'open_relay', pass: kv.open_relay === 'closed', detail: kv.open_relay ?? 'unknown' });
+  // Phase 10F additions: only evaluated when the probe reported them (older probe output stays valid).
+  if (kv.svc_fail2ban !== undefined) checks.push({ id: 'service.fail2ban', pass: kv.svc_fail2ban === 'active', detail: kv.svc_fail2ban });
+  if (kv.svc_fail2ban === 'active' && kv.f2b_jails !== undefined) {
+    const missing = ['postfix-sasl', 'dovecot'].filter((j) => !String(kv.f2b_jails).split('+').includes(j));
+    checks.push({ id: 'fail2ban.jails', pass: missing.length === 0, detail: missing.length ? `missing: ${missing.join(',')}` : kv.f2b_jails });
+  }
+  if (kv.tls_days_left !== undefined) {
+    const days = Number(kv.tls_days_left);
+    if (Number.isFinite(days) && kv.tls_days_left !== '') checks.push({ id: 'tls.expiry', pass: days > 0, warn: days > 0 && days < 14, detail: `${days} days left`, daysLeft: days });
+    else checks.push({ id: 'tls.expiry', pass: true, warn: true, detail: 'unknown' });
+  }
+  if (kv.queue_size !== undefined) {
+    const n = Number(kv.queue_size);
+    const known = Number.isFinite(n) && kv.queue_size !== '' && kv.queue_size !== 'unknown';
+    checks.push({ id: 'queue.size', pass: !known || n <= 500, warn: !known || n > 100, detail: known ? `${n} queued` : 'unknown', queueSize: known ? n : null });
+  }
   const tls = kv.tls ?? 'unknown';
   if (tls === 'existing') {
     checks.push({ id: 'tls', pass: true, warn: false, detail: kv.tls_name ? `letsencrypt:${kv.tls_name}` : 'letsencrypt' });
@@ -407,7 +494,8 @@ export const PROVISION_STEPS = Object.freeze([
   { id: 'opendkim', title: 'Configure OpenDKIM', detail: 'Key/signing tables; private keys generated per domain on the server (0600)', risk: 'high' },
   { id: 'rspamd', title: 'Rspamd baseline', detail: 'Milter proxy on localhost; DKIM signing left to OpenDKIM', risk: 'medium' },
   { id: 'tls', title: 'TLS certificate', detail: "Existing Let's Encrypt cert for the mail hostname if present, else a self-signed placeholder flagged in health", risk: 'medium' },
-  { id: 'services', title: 'Enable and restart services', detail: 'postfix, dovecot, opendkim, rspamd enabled and verified active', risk: 'high' },
+  { id: 'hardening', title: 'Abuse controls', detail: 'fail2ban jails (postfix, postfix-sasl, dovecot), rspamd baseline actions/headers, Postfix anvil rate limits, Dovecot auth_failure_delay', risk: 'medium' },
+  { id: 'services', title: 'Enable and restart services', detail: 'postfix, dovecot, opendkim, rspamd, fail2ban enabled and verified active', risk: 'high' },
 ]);
 
 export const ROLLBACK_NOTES = Object.freeze([
