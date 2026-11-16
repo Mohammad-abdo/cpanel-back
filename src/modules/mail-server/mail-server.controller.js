@@ -17,6 +17,15 @@ export function createMailServerController(service) {
     async previewProvision(req, res) {
       res.status(200).json({ data: await service.previewProvision(req.validated.params.id, req.validated.body, req.user) });
     },
+    async probeHealth(req, res) {
+      res.status(200).json({ data: await service.probeHealth(req.validated.params.id, req.user) });
+    },
+    async previewFirewall(req, res) {
+      res.status(200).json({ data: await service.previewFirewall(req.validated.params.id, req.validated.body, req.user) });
+    },
+    async applyFirewall(req, res) {
+      respond(res, await service.applyFirewall(req.validated.params.id, req.validated.body, req.user));
+    },
     async applyProvision(req, res) {
       respond(res, await service.applyProvision(req.validated.params.id, req.validated.body, req.user));
     },

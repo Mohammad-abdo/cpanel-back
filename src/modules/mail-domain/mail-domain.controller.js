@@ -9,6 +9,9 @@ export function createMailDomainController(service) {
     async disable(req, res) {
       res.status(200).json({ data: await service.disable(req.validated.params.id, req.validated.body, req.user) });
     },
+    async sync(req, res) {
+      res.status(200).json({ data: await service.sync(req.validated.params.id, req.user) });
+    },
     async update(req, res) {
       res.status(200).json({ data: await service.update(req.validated.params.id, req.validated.body, req.user) });
     },

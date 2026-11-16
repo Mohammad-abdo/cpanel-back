@@ -4,7 +4,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { redact } from '../audit/audit.service.js';
 import { statusFromSummary } from '../agents/agents.service.js';
-import { execCommand, execScript, openSftp } from './ssh.connector.js';
+import { execCommand, execScript, execScriptStdin, openSftp } from './ssh.connector.js';
 import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
 import { SITE_LIVE_SCRIPT, assertSafeSitePath, parseSiteLive } from './site-live.scan.js';
 import {
@@ -513,6 +513,22 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             throw new AppError(404, 'PM2_NOT_FOUND', 'pm2 is not installed or not on PATH for the SSH user');
           }
           return parsed;
+        } finally {
+          client.end();
+        }
+      });
+    },
+
+    /**
+     * Serialized SSH session for other modules (mail provisioning). `run(script, {args, stdin, timeoutMs})` executes a
+     * fixed script; secrets go through stdin only. The connection is always closed.
+     */
+    async runRemote(serverId, fn) {
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          return await fn({ run: (script, opts = {}) => execScriptStdin(client, script, opts) });
         } finally {
           client.end();
         }

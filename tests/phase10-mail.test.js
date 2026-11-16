@@ -67,10 +67,10 @@ const configGrant = (userId) => ({ userId, permissionKey: 'project.configure', r
 const leaks = (v) => JSON.stringify(v).match(/passwordHash|scrypt\$|"password"/i);
 
 describe('mail-server: status, enable and provisioning gate', () => {
-  it('defaults to disabled/unprovisioned and reports closed provisioning', async () => {
+  it('defaults to disabled/unprovisioned and reports approval-gated provisioning', async () => {
     const t = setup();
     const s = await t.server.get(SERVER, OWNER);
-    expect(s).toMatchObject({ status: 'disabled', provisioned: false, provisioning: { authorized: false } });
+    expect(s).toMatchObject({ status: 'disabled', provisioned: false, provisioning: { authorized: true, killSwitch: false, requiresApproval: true } });
     expect(s.plannedPorts.map((p) => p.port)).toContain(2096);
   });
   it('enable records intent only and is Owner-only', async () => {
@@ -81,34 +81,18 @@ describe('mail-server: status, enable and provisioning gate', () => {
     expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'mail.server.enable' }));
     expect((await t.server.disable(SERVER, {}, OWNER)).status).toBe('disabled');
   });
-  it('health reports NOT_AUTHORIZED probe with unknown relay state', async () => {
+  it('stored health is NOT_RUN until a live probe has stored a result', async () => {
     const h = await setup().server.health(SERVER, OWNER);
-    expect(h).toMatchObject({ probe: 'NOT_AUTHORIZED', openRelay: 'unknown', checked: false });
+    expect(h).toMatchObject({ probe: 'NOT_RUN', openRelay: 'unknown', checked: false });
   });
   it('preview returns planned steps and executes nothing', async () => {
     const p = await setup().server.previewProvision(SERVER, { mailHostname: 'mail.example.com' }, OWNER);
-    expect(p).toMatchObject({ executes: false, simulated: true });
-    expect(p.steps.map((s) => s.id)).toEqual(expect.arrayContaining(['packages', 'firewall', 'relaytest']));
-    expect(p.steps.find((s) => s.id === 'firewall')).toMatchObject({ risk: 'critical', requiresApproval: true });
-  });
-  it('apply is NOT_AUTHORIZED by default and audited as denied', async () => {
-    const t = setup();
-    await expect(t.server.applyProvision(SERVER, {}, OWNER)).rejects.toMatchObject({ status: 403, code: 'MAIL_PROVISIONING_NOT_AUTHORIZED' });
-    expect(t.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'mail.provision.apply', result: 'denied' }));
-  });
-  it('apply stays closed when only the flag is on or only the lab list names the server', async () => {
-    await expect(setup({ config: { provisioningEnabled: true, labServerIds: [] } }).server.applyProvision(SERVER, {}, OWNER)).rejects.toMatchObject({ code: 'MAIL_PROVISIONING_NOT_AUTHORIZED' });
-    await expect(setup({ config: { provisioningEnabled: false, labServerIds: [SERVER] } }).server.applyProvision(SERVER, {}, OWNER)).rejects.toMatchObject({ code: 'MAIL_PROVISIONING_NOT_AUTHORIZED' });
-  });
-  it('even when opened, apply needs approval first and then hits the unbuilt executor (501)', async () => {
-    const t = setup({ config: { provisioningEnabled: true, labServerIds: [SERVER] } });
-    const first = await t.server.applyProvision(SERVER, { reason: 'lab rollout', rollbackNote: 'remove packages' }, OWNER);
-    expect(first.approvalRequired).toBe(true);
-    await t.platform.decide(first.approval.id, { decision: 'approve' }, APPROVER);
-    await expect(t.server.applyProvision(SERVER, { approvalId: first.approval.id, reason: 'lab rollout', rollbackNote: 'remove packages' }, OWNER)).rejects.toMatchObject({ status: 501, code: 'MAIL_EXECUTOR_NOT_IMPLEMENTED' });
+    expect(p).toMatchObject({ executes: false });
+    expect(p.steps.map((s) => s.id)).toEqual(expect.arrayContaining(['preflight', 'packages', 'postfix', 'services', 'health']));
+    expect(p.steps.map((s) => s.id)).not.toContain('firewall');
   });
   it('non-Owner cannot preview or apply', async () => {
-    const t = setup({ config: { provisioningEnabled: true, labServerIds: [SERVER] } });
+    const t = setup({ config: {} });
     await expect(t.server.previewProvision(SERVER, {}, DEV)).rejects.toMatchObject({ status: 403 });
     await expect(t.server.applyProvision(SERVER, {}, DEV)).rejects.toMatchObject({ status: 403 });
     await expect(t.server.get(SERVER, DEV)).rejects.toMatchObject({ status: 404 });

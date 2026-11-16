@@ -25,11 +25,13 @@ export async function guardSchema(fn) {
   }
 }
 
-/** Provisioning gate state. Closed unless the flag is on AND the server is on the Owner-named lab allowlist. */
-export function provisioningState({ provisioningEnabled = false, labServerIds = [] } = {}, serverId = null) {
-  const flag = provisioningEnabled === true;
-  const labAllowed = Boolean(serverId) && labServerIds.includes(serverId);
-  return { authorized: flag && labAllowed, flagEnabled: flag, labServerAllowed: labAllowed };
+/**
+ * Provisioning state. Phase 10C: provisioning is authorized per action by the approval gate (platform.gate, second person),
+ * not by env allowlists. MAIL_PROVISIONING_DISABLED=true is an operator kill switch that blocks every remote mail action.
+ */
+export function provisioningState({ provisioningDisabled = false } = {}) {
+  const killSwitch = provisioningDisabled === true;
+  return { authorized: !killSwitch, killSwitch, requiresApproval: true };
 }
 
 export function createMailAccess({ prisma, rbac = null, now = () => new Date() }) {

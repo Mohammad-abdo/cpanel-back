@@ -17,5 +17,18 @@ export const provisionApplyBodySchema = z
     reason: z.string().min(5).max(500).optional(),
     rollbackNote: z.string().min(5).max(500).optional(),
     approvalId: z.string().uuid().optional(),
+    confirmAlias: z.string().min(1).max(100).optional(),
+  })
+  .strict();
+
+export const firewallPreviewBodySchema = z.object({ webmail: z.boolean().optional() }).strict();
+
+export const firewallApplyBodySchema = z
+  .object({
+    webmail: z.boolean().optional(),
+    reason: z.string().min(5).max(500).optional(),
+    rollbackNote: z.string().min(5).max(500).optional(),
+    approvalId: z.string().uuid().optional(),
+    confirmAlias: z.string().min(1).max(100).optional(),
   })
   .strict();

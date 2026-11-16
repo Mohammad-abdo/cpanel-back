@@ -16,8 +16,12 @@ import { createMailboxesController } from './mailboxes.controller.js';
 import { createMailboxesService } from './mailboxes.service.js';
 import { getDeps } from '../platform/platform.wiring.js';
 import { wrap } from '../platform/platform.http.js';
+import { createMailRemote } from '../../common/mail-remote.js';
+import { serverAccessService } from '../server-access/server-access.routes.js';
 
-const controller = createMailboxesController(createMailboxesService(getDeps()));
+const config = { provisioningDisabled: process.env.MAIL_PROVISIONING_DISABLED === 'true' };
+const deps = getDeps();
+const controller = createMailboxesController(createMailboxesService({ ...deps, remote: createMailRemote({ prisma: deps.prisma, ssh: serverAccessService, config }) }));
 const write = requireSession({ requireMfa: true });
 
 // Mailbox password changes are an account-takeover primitive: 20 per 15 minutes per actor (in-memory, per process).

@@ -61,7 +61,7 @@ describe('mail-server (Owner only writes)', () => {
     }
   });
 
-  it('owner enable is metadata-only and provisioning apply is 403 MAIL_PROVISIONING_NOT_AUTHORIZED', async () => {
+  it('owner enable is metadata-only and provisioning apply requires the typed alias (422)', async () => {
     const { server } = await seedWorld();
     const owner = await actor({ ownerFlag: true });
     const en = await request(app).post(`${API}/servers/${server.id}/mail/enable`).set(bearer(owner.token)).send({ mailHostname: 'mail.example.test' });
@@ -72,8 +72,8 @@ describe('mail-server (Owner only writes)', () => {
     expect(prev.status).toBe(200);
     expect(prev.body.data.executes).toBe(false);
     const apply = await request(app).post(`${API}/servers/${server.id}/mail/provision/apply`).set(bearer(owner.token)).send({});
-    expect(apply.status).toBe(403);
-    expect(apply.body.error.code).toBe('MAIL_PROVISIONING_NOT_AUTHORIZED');
+    expect(apply.status).toBe(422);
+    expect(apply.body.error.code).toBe('CONFIRM_ALIAS_MISMATCH');
   });
 
   it('validates input with 400 VALIDATION_ERROR (the API validation status)', async () => {

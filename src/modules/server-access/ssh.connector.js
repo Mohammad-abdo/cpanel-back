@@ -111,3 +111,37 @@ export function openSftp(client) {
     client.sftp((err, sftp) => (err ? reject(new AppError(502, 'SFTP_UNAVAILABLE', 'SFTP is not available on this server')) : resolve(sftp)));
   });
 }
+
+const shq = (a) => `'${String(a).replace(/'/g, `'\''`)}'`;
+
+/**
+ * Runs a fixed script with optional positional args AND a stdin payload (for secrets).
+ * The script text travels base64-encoded in the command line (it contains no secrets); the payload goes only
+ * through the SSH channel's stdin. Returns bounded stdout and a short stderr tail (scripts never print secrets).
+ */
+export function execScriptStdin(client, script, { args = [], stdin = '', maxBytes = 256 * 1024, timeoutMs = 60_000 } = {}) {
+  const b64 = Buffer.from(String(script).replace(/\r\n/g, '\n'), 'utf8').toString('base64');
+  const command = `bash -c "$(printf %s ${shq(b64)} | base64 -d)" nt-script ${(args ?? []).map(shq).join(' ')}`.trim();
+  return new Promise((resolve, reject) => {
+    client.exec(command, (err, stream) => {
+      if (err) return reject(new AppError(502, 'SSH_EXEC_FAILED', 'Could not run the script over SSH'));
+      let out = '';
+      let errOut = '';
+      const timer = setTimeout(() => {
+        stream.close();
+        resolve({ code: null, stdout: out, stderr: errOut, timedOut: true });
+      }, timeoutMs);
+      stream.on('data', (d) => {
+        if (out.length < maxBytes) out += d.toString('utf8');
+      });
+      stream.stderr.on('data', (d) => {
+        if (errOut.length < 4096) errOut += d.toString('utf8');
+      });
+      stream.on('close', (code) => {
+        clearTimeout(timer);
+        resolve({ code, stdout: out.slice(0, maxBytes), stderr: errOut.slice(-600) });
+      });
+      stream.end(String(stdin ?? ''));
+    });
+  });
+}

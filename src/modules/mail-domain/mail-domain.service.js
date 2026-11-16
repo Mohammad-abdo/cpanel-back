@@ -43,9 +43,26 @@ export function renderMailDnsRecipe({ domain, mailHostname = null, serverIp = nu
   };
 }
 
-export function createMailDomainService({ prisma, now = () => new Date(), auditService = null, rbac = null }) {
+export function createMailDomainService({ prisma, now = () => new Date(), auditService = null, rbac = null, remote = null }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const access = createMailAccess({ prisma, rbac, now });
+
+  /** Push virtual domain + DKIM generation to a provisioned server. Never throws: panel state stays authoritative (metadata-only fallback). */
+  async function pushDomain(domain, cfg, actor) {
+    if (!remote) return { pushed: false, reason: 'no_executor' };
+    try {
+      const res = await remote.addDomain(domain.serverId, { domain: domain.name, selector: cfg.dkimSelector ?? 'nt1' });
+      if (res.pushed && res.dkimPublicKey) {
+        await guardSchema(() => mailDelegate(prisma, 'domainMailConfig').update({ where: { domainId: domain.id }, data: { dkimPublicKey: res.dkimPublicKey } }));
+        cfg.dkimPublicKey = res.dkimPublicKey;
+      }
+      await audit({ actorId: actor.id, action: 'mail.domain.push', resourceType: 'domain', resourceId: domain.id, result: res.pushed ? 'success' : 'skipped', metadata: { reason: res.reason ?? null, dkimPublished: Boolean(res.dkimPublicKey) } });
+      return { pushed: res.pushed, reason: res.reason ?? null };
+    } catch (e) {
+      await audit({ actorId: actor.id, action: 'mail.domain.push', resourceType: 'domain', resourceId: domain.id, result: 'failure', metadata: { code: e?.code ?? 'ERROR' } });
+      return { pushed: false, reason: e?.code ?? 'push_failed' };
+    }
+  }
 
   const view = (domain, cfg, mailboxCount, serverMail) => ({
     domainId: domain.id,
@@ -106,8 +123,21 @@ export function createMailDomainService({ prisma, now = () => new Date(), auditS
         }),
       );
       await audit({ actorId: actor.id, action: 'mail.domain.enable', resourceType: 'domain', resourceId: domainId, result: 'success', after: { enabled: true, quotaDefaultMb: row.quotaDefaultMb } });
+      const remoteResult = await pushDomain(domain, row, actor);
       const { mailboxCount, serverMail } = await aux(domain);
-      return view(domain, row, mailboxCount, serverMail);
+      return { ...view(domain, row, mailboxCount, serverMail), remote: remoteResult };
+    },
+
+    /** Re-push the virtual domain and DKIM key (e.g. enabled before the stack was provisioned). */
+    async sync(domainId, actor) {
+      const domain = await access.loadDomain(domainId, actor);
+      await access.requireWrite(actor, domain);
+      const cfg = await guardSchema(() => mailDelegate(prisma, 'domainMailConfig').findUnique({ where: { domainId } }));
+      if (!cfg?.enabled) throw new AppError(409, 'MAIL_DOMAIN_NOT_ENABLED', 'Enable mail for this domain first');
+      const remoteResult = await pushDomain(domain, { ...cfg }, actor);
+      const { cfg: fresh } = await readConfig(domainId);
+      const { mailboxCount, serverMail } = await aux(domain);
+      return { ...view(domain, fresh ?? cfg, mailboxCount, serverMail), remote: remoteResult };
     },
 
     async disable(domainId, { reason }, actor) {

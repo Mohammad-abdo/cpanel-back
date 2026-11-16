@@ -26,9 +26,25 @@ export function toMailboxDto(row, domainName) {
 const EVENT_FIELDS = ['id', 'mailboxId', 'actorId', 'action', 'metadataJson', 'createdAt'];
 const toEventDto = (e) => Object.fromEntries(EVENT_FIELDS.map((k) => [k, e[k] ?? null]));
 
-export function createMailboxesService({ prisma, now = () => new Date(), auditService = null, rbac = null }) {
+export function createMailboxesService({ prisma, now = () => new Date(), auditService = null, rbac = null, remote = null }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const access = createMailAccess({ prisma, rbac, now });
+
+  /** Push to a provisioned server. The password goes over the SSH session (stdin) only; never logged, audited or returned. */
+  async function pushMailbox(mb, domain, password, actor) {
+    if (!remote) return { pushed: false, reason: 'no_executor' };
+    const address = `${mb.localPart}@${domain.name}`;
+    try {
+      const res = await remote.setMailbox(domain.serverId, { address, quotaMb: mb.quotaMb, password });
+      if (res.pushed) await guardSchema(() => mailDelegate(prisma, 'mailboxAccount').update({ where: { id: mb.id }, data: { provisioned: true } }));
+      await event(mb.id, actor, 'push', { pushed: res.pushed, reason: res.reason ?? null });
+      await audit({ actorId: actor.id, action: 'mailbox.push', resourceType: 'mailbox', resourceId: mb.id, result: res.pushed ? 'success' : 'skipped', metadata: { address, reason: res.reason ?? null } });
+      return { pushed: res.pushed, reason: res.reason ?? null };
+    } catch (e) {
+      await audit({ actorId: actor.id, action: 'mailbox.push', resourceType: 'mailbox', resourceId: mb.id, result: 'failure', metadata: { address, code: e?.code ?? 'ERROR' } });
+      return { pushed: false, reason: e?.code ?? 'push_failed' };
+    }
+  }
 
   async function event(mailboxId, actor, action, metadataJson = null) {
     await guardSchema(() => mailDelegate(prisma, 'mailboxAuditEvent').create({ data: { mailboxId, actorId: actor.id, action, metadataJson } }));
@@ -104,7 +120,8 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
       );
       await event(row.id, actor, 'create', { address: `${row.localPart}@${domain.name}`, quotaMb: row.quotaMb });
       await audit({ actorId: actor.id, action: 'mailbox.create', resourceType: 'mailbox', resourceId: row.id, result: 'success', after: { address: `${row.localPart}@${domain.name}`, quotaMb: row.quotaMb } });
-      return toMailboxDto(row, domain.name);
+      const remoteResult = await pushMailbox(row, domain, input.password, actor);
+      return { ...toMailboxDto({ ...row, provisioned: remoteResult.pushed || row.provisioned }, domain.name), remote: remoteResult };
     },
 
     async update(id, input, actor) {
@@ -125,7 +142,8 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
       );
       await event(id, actor, 'password.set', { provisioned: false });
       await audit({ actorId: actor.id, action: 'mailbox.password.set', resourceType: 'mailbox', resourceId: id, result: 'success', metadata: { address: `${mb.localPart}@${domain.name}` } });
-      return toMailboxDto(row ?? mb, domain.name);
+      const remoteResult = await pushMailbox({ ...mb, ...(row ?? {}) }, domain, password, actor);
+      return { ...toMailboxDto({ ...(row ?? mb), provisioned: remoteResult.pushed }, domain.name), remote: remoteResult };
     },
 
     async suspend(id, { reason }, actor) {
@@ -154,6 +172,13 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
       const row = await guardSchema(() =>
         mailDelegate(prisma, 'mailboxAccount').update({ where: { id }, data: { status: 'deleted', deletedAt: now(), passwordHash: null } }),
       );
+      if (remote && mb.provisioned) {
+        try {
+          await remote.removeMailbox(domain.serverId, { address: `${mb.localPart}@${domain.name}` });
+        } catch {
+          /* best effort: login is already disabled panel-side; the audit row below records the delete */
+        }
+      }
       await event(id, actor, 'delete', { reason: reason ?? null });
       await audit({ actorId: actor.id, action: 'mailbox.delete', resourceType: 'mailbox', resourceId: id, result: 'success', before: { address: `${mb.localPart}@${domain.name}` }, metadata: { reason: reason ?? null } });
       return toMailboxDto(row ?? { ...mb, status: 'deleted' }, domain.name);
