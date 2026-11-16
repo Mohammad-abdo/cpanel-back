@@ -132,15 +132,25 @@ function normalizePm2(proc) {
 
 function matchPm2(list, { path, name, slug }) {
   const base = path ? path.replace(/\/+$/, '').split('/').pop() : '';
+  const baseHost = base.includes('.') ? base.split('.')[0] : base;
   const out = [];
   for (const proc of list) {
     const row = normalizePm2(proc);
     const { cwd, name: pname, script } = row;
+    const underPath =
+      path &&
+      (cwd === path ||
+        cwd.startsWith(`${path}/`) ||
+        script.startsWith(`${path}/`) ||
+        (cwd && path.startsWith(`${cwd}/`)));
     const hit =
-      (path && (cwd === path || cwd.startsWith(`${path}/`) || script.startsWith(`${path}/`))) ||
-      (name && (pname === name || pname.includes(name))) ||
-      (slug && (pname === slug || pname.includes(slug))) ||
-      (base && (pname === base || pname.includes(base) || cwd.includes(`/${base}`) || script.includes(`/${base}/`)));
+      underPath ||
+      (name && pname === name) ||
+      (slug && pname === slug) ||
+      (base && pname === base) ||
+      (baseHost && baseHost.length >= 3 && pname === baseHost) ||
+      (name && name.length >= 5 && (pname.startsWith(name) || name.startsWith(pname))) ||
+      (base && cwd && (cwd.endsWith(`/${base}`) || cwd.includes(`/${base}/`)));
     if (!hit) continue;
     const { script: _s, ...rest } = row;
     out.push(rest);
@@ -155,11 +165,9 @@ export function parseSiteLive(text, { path, name, slug } = {}) {
   let pm2Total = 0;
   let pm2Names = [];
   let pm2RawLen = 0;
-  let pm2RawHead = '';
   try {
     let raw = (sec.pm2 ?? []).join('\n').trim();
     pm2RawLen = raw.length;
-    pm2RawHead = raw.slice(0, 120);
     if (raw.startsWith('[')) {
       let list;
       try {
@@ -210,7 +218,6 @@ export function parseSiteLive(text, { path, name, slug } = {}) {
     pm2Total,
     pm2Names,
     pm2RawLen,
-    pm2RawHead,
     logs: {
       source: logSource,
       lines: logLines.slice(-120),

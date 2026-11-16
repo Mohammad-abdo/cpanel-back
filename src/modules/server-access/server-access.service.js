@@ -5,6 +5,22 @@ import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { execCommand, execScript, openSftp } from './ssh.connector.js';
 import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
 import { SITE_LIVE_SCRIPT, assertSafeSitePath, parseSiteLive } from './site-live.scan.js';
+import {
+  SAFE_ENGINE,
+  assertSafeDbName,
+  assertSafeIdent,
+  describeTableSql,
+  filterSchemaNames,
+  isMutatingSql,
+  listSchemasSql,
+  listTablesSql,
+  mysqlCmd,
+  parseMysqlBatch,
+  parsePsqlAligned,
+  postgresCmd,
+  postgresCmdInDb,
+  selectRowsSql,
+} from './db-live.scan.js';
 
 const posix = path.posix;
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
@@ -106,10 +122,22 @@ export function normalizeRemotePath(p, home = '/') {
 export function createServerAccessService({ prisma, connector, auditService = null, now = () => new Date(), credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY }) {
   const audit = (event) => (auditService?.record ? auditService.record({ resourceType: 'server', ...event }) : null);
   const tickets = new Map();
+  /** Serialize SSH sessions per server so live polls + service actions do not stampede and time out. */
+  const sshLocks = new Map();
 
   function requireOwner(actor) {
     if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
     if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can use server SSH access');
+  }
+
+  function withSshLock(serverId, task) {
+    const prev = sshLocks.get(serverId) ?? Promise.resolve();
+    const run = prev.catch(() => {}).then(task);
+    sshLocks.set(
+      serverId,
+      run.catch(() => {}),
+    );
+    return run;
   }
 
   const summary = (c) =>
@@ -367,13 +395,16 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     async info(serverId, actor) {
       requireOwner(actor);
       const cred = await loadCredential(serverId);
-      const { client } = await connectWith(cred);
-      try {
-        const res = await execCommand(client, INFO_SCRIPT, { maxBytes: 512 * 1024, timeoutMs: 15_000 });
-        return { ...parseServerInfo(res.stdout), collectedAt: now().toISOString() };
-      } finally {
-        client.end();
-      }
+      return withSshLock(serverId, async () => {
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execCommand(client, INFO_SCRIPT, { maxBytes: 512 * 1024, timeoutMs: 30_000 });
+          if (res.timedOut) throw new AppError(504, 'SSH_INFO_TIMEOUT', 'Server info over SSH timed out');
+          return { ...parseServerInfo(res.stdout), collectedAt: now().toISOString() };
+        } finally {
+          client.end();
+        }
+      });
     },
 
     /** systemctl <action> <name>. The name is validated, so it is a single safe argument. */
@@ -381,19 +412,22 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       requireOwner(actor);
       if (!SERVICE_NAME.test(name ?? '')) throw new AppError(422, 'SERVICE_NAME_INVALID', 'Invalid service name');
       if (!SERVICE_ACTIONS.includes(action)) throw new AppError(422, 'SERVICE_ACTION_INVALID', 'Invalid service action');
-      const cred = await loadCredential(serverId);
-      const { client } = await connectWith(cred);
-      try {
-        const sudo = cred.username === 'root' ? '' : 'sudo -n ';
-        const res = await execCommand(client, `${sudo}systemctl ${action} ${name} --no-pager 2>&1`, { timeoutMs: 60_000 });
-        const ok = res.code === 0 || (action === 'status' && res.code !== null && res.code <= 4);
-        if (action !== 'status') {
-          await audit({ actorId: actor.id, action: `server.service.${action}`, resourceId: serverId, result: ok ? 'success' : 'failure', after: { service: name, exitCode: res.code } });
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const sudo = cred.username === 'root' ? '' : 'sudo -n ';
+          const res = await execCommand(client, `${sudo}systemctl ${action} ${name} --no-pager 2>&1`, { timeoutMs: 90_000 });
+          if (res.timedOut) throw new AppError(504, 'SERVICE_TIMEOUT', `systemctl ${action} ${name} timed out over SSH`);
+          const ok = res.code === 0 || (action === 'status' && res.code !== null && res.code <= 4);
+          if (action !== 'status') {
+            await audit({ actorId: actor.id, action: `server.service.${action}`, resourceId: serverId, result: ok ? 'success' : 'failure', after: { service: name, exitCode: res.code } });
+          }
+          return { name, action, ok, exitCode: res.code, output: res.stdout.slice(-8000) };
+        } finally {
+          client.end();
         }
-        return { name, action, ok, exitCode: res.code, output: res.stdout.slice(-8000) };
-      } finally {
-        client.end();
-      }
+      });
     },
 
     /**
@@ -403,27 +437,157 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     async inspectSite(serverId, { path, name = '', slug = '' }, actor) {
       requireOwner(actor);
       if (!assertSafeSitePath(path)) throw new AppError(400, 'PATH_INVALID', 'Invalid project path');
-      const cred = await loadCredential(serverId);
-      let client;
-      try {
-        ({ client } = await connectWith(cred));
-        const res = await execScript(client, SITE_LIVE_SCRIPT, {
-          maxBytes: 900 * 1024,
-          timeoutMs: 60_000,
-          args: [path, name || '', slug || ''],
-        });
-        if (res.timedOut) throw new AppError(504, 'SITE_LIVE_TIMEOUT', 'Live site inspect timed out');
-        return parseSiteLive(res.stdout, { path, name, slug });
-      } catch (err) {
-        if (err instanceof AppError) throw err;
-        throw new AppError(502, 'SITE_LIVE_FAILED', err?.message || 'Live site inspect failed');
-      } finally {
+      return withSshLock(serverId, async () => {
+        let client;
         try {
-          client?.end();
-        } catch {
-          /* ignore */
+          const cred = await loadCredential(serverId);
+          ({ client } = await connectWith(cred));
+          const res = await execScript(client, SITE_LIVE_SCRIPT, {
+            maxBytes: 900 * 1024,
+            timeoutMs: 60_000,
+            args: [path, name || '', slug || ''],
+          });
+          if (res.timedOut) throw new AppError(504, 'SITE_LIVE_TIMEOUT', 'Live site inspect timed out');
+          return parseSiteLive(res.stdout, { path, name, slug });
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          throw new AppError(502, 'SITE_LIVE_FAILED', err?.message || 'Live site inspect failed');
+        } finally {
+          try {
+            client?.end();
+          } catch {
+            /* ignore */
+          }
         }
-      }
+      });
+    },
+
+    /**
+     * Live DB browse over SSH CLI (MySQL / Postgres). Owner MFA only.
+     * action: schemas | tables | columns | rows | query
+     */
+    async dbBrowse(serverId, { engine, action, db, table, sql, limit, offset }, actor) {
+      requireOwner(actor);
+      if (!SAFE_ENGINE.has(engine)) throw new AppError(422, 'DB_ENGINE_INVALID', 'Engine must be mysql or postgres');
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const run = async (command) => {
+            const res = await execCommand(client, command, { maxBytes: 512 * 1024, timeoutMs: 60_000 });
+            if (res.timedOut) throw new AppError(504, 'DB_LIVE_TIMEOUT', 'Database command over SSH timed out');
+            if (res.code !== 0 && !String(res.stdout || '').trim()) {
+              throw new AppError(502, 'DB_LIVE_FAILED', 'Database CLI returned no data (missing client auth or privileges?)');
+            }
+            return res.stdout || '';
+          };
+          const parse = (text) => (engine === 'mysql' ? parseMysqlBatch(text) : parsePsqlAligned(text));
+
+          if (action === 'schemas') {
+            const text = await run(engine === 'mysql' ? mysqlCmd(listSchemasSql(engine)) : postgresCmd(listSchemasSql(engine)));
+            const parsed = parse(text);
+            const names =
+              engine === 'mysql'
+                ? parsed.rows.map((r) => r.Database ?? r.database ?? Object.values(r)[0]).filter(Boolean)
+                : parsed.rows.map((r) => r.name ?? r.datname ?? Object.values(r)[0]).filter(Boolean);
+            // SHOW DATABASES may return a single column without header named Database when parse fails — also accept raw lines.
+            const fallback = !names.length
+              ? String(text)
+                  .split('\n')
+                  .map((l) => l.trim())
+                  .filter((l) => l && l !== 'Database' && l !== 'name')
+              : names;
+            return {
+              engine,
+              schemas: filterSchemaNames(engine, fallback),
+              collectedAt: now().toISOString(),
+            };
+          }
+
+          if (action === 'tables') {
+            assertSafeDbName(db);
+            const text =
+              engine === 'mysql'
+                ? await run(mysqlCmd(listTablesSql(engine, db), db))
+                : await run(postgresCmdInDb(db, listTablesSql(engine, db)));
+            const { columns, rows } = parse(text);
+            return { engine, db, columns, tables: rows, collectedAt: now().toISOString() };
+          }
+
+          if (action === 'columns') {
+            assertSafeDbName(db);
+            assertSafeIdent(table, 'table');
+            const text =
+              engine === 'mysql'
+                ? await run(mysqlCmd(describeTableSql(engine, db, table), db))
+                : await run(postgresCmdInDb(db, describeTableSql(engine, db, table)));
+            const { columns, rows } = parse(text);
+            return { engine, db, table, columns, fields: rows, collectedAt: now().toISOString() };
+          }
+
+          if (action === 'rows') {
+            assertSafeDbName(db);
+            assertSafeIdent(table, 'table');
+            const text =
+              engine === 'mysql'
+                ? await run(mysqlCmd(selectRowsSql(engine, db, table, limit, offset), db))
+                : await run(postgresCmdInDb(db, selectRowsSql(engine, db, table, limit, offset)));
+            const { columns, rows } = parse(text);
+            return {
+              engine,
+              db,
+              table,
+              columns,
+              rows,
+              limit: Math.min(Math.max(Number(limit) || 50, 1), 200),
+              offset: Math.min(Math.max(Number(offset) || 0, 0), 100000),
+              collectedAt: now().toISOString(),
+            };
+          }
+
+          if (action === 'query') {
+            if (typeof sql !== 'string' || sql.trim().length < 1 || sql.length > 20_000) {
+              throw new AppError(422, 'DB_SQL_INVALID', 'SQL must be 1–20000 characters');
+            }
+            if (sql.includes(';') && sql.trim().replace(/;+\s*$/, '').includes(';')) {
+              throw new AppError(422, 'DB_SQL_MULTI', 'Only a single SQL statement is allowed');
+            }
+            const mutating = isMutatingSql(sql);
+            if (db) assertSafeDbName(db);
+            const text =
+              engine === 'mysql'
+                ? await run(mysqlCmd(sql, db || null))
+                : await run(db ? postgresCmdInDb(db, sql) : postgresCmd(sql));
+            const { columns, rows } = parse(text);
+            await audit({
+              actorId: actor.id,
+              action: mutating ? 'server.db.query.write' : 'server.db.query.read',
+              resourceId: serverId,
+              result: 'success',
+              after: { engine, db: db || null, mutating, sqlPreview: sql.slice(0, 200) },
+            });
+            return {
+              engine,
+              db: db || null,
+              mutating,
+              columns,
+              rows,
+              rowCount: rows.length,
+              collectedAt: now().toISOString(),
+            };
+          }
+
+          throw new AppError(422, 'DB_ACTION_INVALID', 'Unknown database browse action');
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          if (err?.code === 'DB_IDENT_INVALID' || err?.code === 'DB_NAME_INVALID') {
+            throw new AppError(422, err.code, err.message);
+          }
+          throw new AppError(502, 'DB_LIVE_FAILED', err?.message || 'Database browse failed');
+        } finally {
+          client.end();
+        }
+      });
     },
 
     // ---- inventory (read-only scan + import into panel records) ------------------------------

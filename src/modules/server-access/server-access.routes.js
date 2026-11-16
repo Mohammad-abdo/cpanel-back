@@ -23,7 +23,7 @@ import {
 /** Shared instance: the terminal WebSocket (server.js) consumes tickets issued by these routes. */
 export const serverAccessService = createServerAccessService({
   prisma,
-  connector: createSshConnector(),
+  connector: createSshConnector({ timeoutMs: 30_000 }),
   auditService: createAuditService({ prisma }),
 });
 const c = createServerAccessController(serverAccessService);
