@@ -35,7 +35,17 @@ export function requireWebmailSession(authService, { optional = false } = {}) {
       if (optional) return next();
       throw new AppError(401, 'WEBMAIL_SESSION_REQUIRED', 'Webmail login required');
     }
-    req.webmail = await authService.resolveSession(token);
+    try {
+      req.webmail = await authService.resolveSession(token);
+    } catch (err) {
+      // Stale/corrupt cookies must never surface as 500 — always soft-fail to login.
+      if (optional) {
+        req.webmail = null;
+        return next();
+      }
+      if (err instanceof AppError) throw err;
+      throw new AppError(401, 'WEBMAIL_SESSION_EXPIRED', 'Webmail session expired');
+    }
     return next();
   });
 }

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { AppError } from '../../common/errors/app-error.js';
-import { verifyMailboxLogin } from '../../common/webmail-imap.js';
+import { verifyMailboxLogin, withSshMailTunnel } from '../../common/webmail-imap.js';
 import { decrypt, encrypt, sha256 } from '../platform/platform.crypto.js';
 
 const COOKIE = 'nt_wm';
@@ -14,22 +14,48 @@ function credentialKey() {
   return process.env.CREDENTIAL_ENCRYPTION_KEY;
 }
 
-function tlsInsecure() {
-  return process.env.WEBMAIL_TLS_INSECURE === '1' || process.env.WEBMAIL_TLS_INSECURE === 'true' || process.env.NODE_ENV !== 'production';
-}
+/**
+ * Webmail auth. IMAP is reached through an SSH tunnel to 127.0.0.1:993 on the
+ * mailbox's server so public DNS mistakes / closed 993 do not break panel webmail.
+ */
+export function createWebmailAuthService({ prisma, ssh = null, now = () => new Date() }) {
+  async function resolveServerId(domain) {
+    if (!domain?.serverId) throw new AppError(409, 'DOMAIN_NO_SERVER', 'Domain is not linked to a mail server');
+    const mail = await prisma.serverMailService.findUnique({ where: { serverId: domain.serverId } });
+    if (!mail?.provisioned) throw new AppError(409, 'MAIL_NOT_PROVISIONED', 'Mail stack is not provisioned on this server');
+    return domain.serverId;
+  }
 
-/** Resolve IMAP host for a mailbox's server. Prefer mailHostname, else SSH credential host. */
-async function resolveMailHost(prisma, domain) {
-  if (!domain?.serverId) throw new AppError(409, 'DOMAIN_NO_SERVER', 'Domain is not linked to a mail server');
-  const mail = await prisma.serverMailService.findUnique({ where: { serverId: domain.serverId } });
-  if (!mail?.provisioned) throw new AppError(409, 'MAIL_NOT_PROVISIONED', 'Mail stack is not provisioned on this server');
-  if (mail.mailHostname) return { host: mail.mailHostname, serverId: domain.serverId, mail };
-  const cred = await prisma.serverCredential.findUnique({ where: { serverId: domain.serverId } });
-  if (cred?.host) return { host: cred.host, serverId: domain.serverId, mail };
-  throw new AppError(409, 'MAIL_HOST_UNKNOWN', 'No mail hostname is configured');
-}
+  async function sleep(ms) {
+    await new Promise((r) => setTimeout(r, ms));
+  }
 
-export function createWebmailAuthService({ prisma, now = () => new Date() }) {
+  /** SSH to this VPS is occasionally flaky (ETIMEDOUT). Retry transient tunnel failures only. */
+  async function viaTunnel(serverId, address, password, fn) {
+    if (!ssh?.runRemote) throw new AppError(500, 'SSH_UNAVAILABLE', 'SSH access is not wired for webmail');
+    const attempts = 3;
+    let last;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await ssh.runRemote(serverId, async ({ client }) => {
+          if (!client) throw new AppError(500, 'SSH_UNAVAILABLE', 'SSH client missing');
+          return withSshMailTunnel(client, { address, password }, fn);
+        });
+      } catch (e) {
+        last = e;
+        const code = e?.code;
+        const retryable =
+          code === 'SSH_UNREACHABLE' ||
+          code === 'SSH_TIMEOUT' ||
+          code === 'WEBMAIL_TUNNEL_FAILED' ||
+          code === 'WEBMAIL_IMAP_UNREACHABLE';
+        if (!retryable || i === attempts - 1) throw e;
+        await sleep(1200 * (i + 1));
+      }
+    }
+    throw last;
+  }
+
   return {
     cookieName: COOKIE,
 
@@ -51,15 +77,21 @@ export function createWebmailAuthService({ prisma, now = () => new Date() }) {
       });
       if (!mailbox?.provisioned) deny();
 
-      let hostInfo;
+      let serverId;
       try {
-        hostInfo = await resolveMailHost(prisma, domain);
+        serverId = await resolveServerId(domain);
       } catch (e) {
         if (e instanceof AppError && e.status === 409) deny();
         throw e;
       }
 
-      await verifyMailboxLogin({ host: hostInfo.host, address, password, tlsInsecure: tlsInsecure() });
+      try {
+        await viaTunnel(serverId, address, password, (ctx) => verifyMailboxLogin(ctx));
+      } catch (e) {
+        // Wrong password stays 401; SSH/tunnel problems become clear 502s (not "invalid password").
+        if (e instanceof AppError && e.status === 401) deny();
+        throw e;
+      }
 
       const token = randomBytes(32).toString('base64url');
       const expiresAt = new Date(now().getTime() + SESSION_HOURS * 3600_000);
@@ -99,42 +131,58 @@ export function createWebmailAuthService({ prisma, now = () => new Date() }) {
 
     async resolveSession(token) {
       if (!token) throw new AppError(401, 'WEBMAIL_SESSION_REQUIRED', 'Webmail login required');
-      const row = await prisma.mailboxSession.findUnique({
-        where: { tokenHash: hashToken(token) },
-        include: {
-          mailbox: {
-            include: {
-              domain: { include: { mailConfig: true, server: { include: { mailService: true, credential: true } } } },
+      const expired = () => {
+        throw new AppError(401, 'WEBMAIL_SESSION_EXPIRED', 'Webmail session expired');
+      };
+      let row;
+      try {
+        row = await prisma.mailboxSession.findUnique({
+          where: { tokenHash: hashToken(token) },
+          include: {
+            mailbox: {
+              include: {
+                domain: { include: { mailConfig: true, server: { select: { id: true } } } },
+              },
             },
           },
-        },
-      });
-      if (!row || row.revokedAt || row.expiresAt <= now()) {
-        throw new AppError(401, 'WEBMAIL_SESSION_EXPIRED', 'Webmail session expired');
+        });
+      } catch {
+        expired();
       }
+      if (!row || row.revokedAt || row.expiresAt <= now()) expired();
       const mb = row.mailbox;
-      if (!mb || mb.status !== 'active' || mb.deletedAt) throw new AppError(401, 'WEBMAIL_SESSION_EXPIRED', 'Webmail session expired');
+      if (!mb || mb.status !== 'active' || mb.deletedAt) expired();
       const domain = mb.domain;
+      if (!domain?.name) expired();
       const address = `${mb.localPart}@${domain.name}`;
-      const host = domain.server?.mailService?.mailHostname || domain.server?.credential?.host;
-      if (!host) throw new AppError(409, 'MAIL_HOST_UNKNOWN', 'Mail hostname is not configured');
+      const serverId = domain.serverId || domain.server?.id;
+      if (!serverId) throw new AppError(409, 'MAIL_HOST_UNKNOWN', 'Mail server is not linked');
       let password;
       try {
-        password = decrypt(Buffer.from(row.secretEnc), credentialKey()).toString('utf8');
+        const blob = Buffer.isBuffer(row.secretEnc) ? row.secretEnc : Buffer.from(row.secretEnc);
+        password = decrypt(blob, credentialKey()).toString('utf8');
       } catch {
-        throw new AppError(401, 'WEBMAIL_SESSION_EXPIRED', 'Webmail session expired');
+        expired();
       }
-      await prisma.mailboxSession.update({ where: { id: row.id }, data: { lastSeenAt: now() } });
+      try {
+        await prisma.mailboxSession.update({ where: { id: row.id }, data: { lastSeenAt: now() } });
+      } catch {
+        /* non-fatal */
+      }
       return {
         sessionId: row.id,
         mailboxId: mb.id,
+        serverId,
         address,
         displayName: mb.displayName,
         domain: domain.name,
-        host,
         password,
-        tlsInsecure: tlsInsecure(),
       };
+    },
+
+    /** Execute IMAP/SMTP work inside an SSH tunnel for this session. */
+    async withMail(session, fn) {
+      return viaTunnel(session.serverId, session.address, session.password, fn);
     },
 
     me(session) {

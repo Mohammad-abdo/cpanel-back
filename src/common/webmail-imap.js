@@ -1,38 +1,67 @@
 import { ImapFlow } from 'imapflow';
 import nodemailer from 'nodemailer';
 import { AppError } from './errors/app-error.js';
+import { openMailForwards } from './webmail-ssh-tunnel.js';
 
 const MAX_LIST = 100;
 const MAX_BODY = 2_000_000;
 
-/** Build IMAP/SMTP endpoints for a provisioned mail host. */
-export function mailEndpoints(host, { tlsInsecure = false } = {}) {
+/** Direct IMAP/SMTP endpoints (public host). Prefer SSH tunnel for panel-hosted webmail. */
+export function mailEndpoints(host, { port, tlsInsecure = false } = {}) {
   if (!host) throw new AppError(409, 'MAIL_HOST_UNKNOWN', 'Mail hostname is not configured for this server');
   return {
-    imap: { host, port: 993, secure: true, tls: { rejectUnauthorized: !tlsInsecure } },
+    imap: { host, port: port ?? 993, secure: true, tls: { rejectUnauthorized: !tlsInsecure } },
     smtp: { host, port: 465, secure: true, tls: { rejectUnauthorized: !tlsInsecure } },
   };
 }
 
-export async function verifyMailboxLogin({ host, address, password, tlsInsecure }) {
-  const ep = mailEndpoints(host, { tlsInsecure });
+function mapImapError(err, fallbackCode = 'WEBMAIL_IMAP_FAILED') {
+  if (err instanceof AppError) throw err;
+  const msg = String(err?.responseText || err?.message || '');
+  if (/auth|credential|login|password|invalid/i.test(msg) || err?.authenticationFailed) {
+    throw new AppError(401, 'WEBMAIL_AUTH_FAILED', 'Invalid email or password');
+  }
+  throw new AppError(502, fallbackCode, `Mail server unreachable: ${msg.slice(0, 160) || 'connection failed'}`);
+}
+
+/**
+ * Run fn with IMAP (+ optional SMTP) reached via SSH local forward to 127.0.0.1 on the VPS.
+ * Avoids wrong public DNS (e.g. mail.* pointing elsewhere) and closed public 993/465.
+ */
+export async function withSshMailTunnel(sshClient, { address, password }, fn) {
+  const fwd = await openMailForwards(sshClient);
+  try {
+    const ctx = {
+      host: '127.0.0.1',
+      imapPort: fwd.imapPort,
+      smtpPort: fwd.smtpPort,
+      address,
+      password,
+      tlsInsecure: true, // localhost tunnel; cert is for the public mail name
+    };
+    return await fn(ctx);
+  } finally {
+    await fwd.close();
+  }
+}
+
+export async function verifyMailboxLogin(ctx) {
   const client = new ImapFlow({
-    ...ep.imap,
-    auth: { user: address, pass: password },
+    host: ctx.host,
+    port: ctx.imapPort ?? 993,
+    secure: true,
+    auth: { user: ctx.address, pass: ctx.password },
     logger: false,
-    connectionTimeout: 20_000,
-    greetingTimeout: 20_000,
+    connectionTimeout: 25_000,
+    greetingTimeout: 25_000,
+    tls: { rejectUnauthorized: !ctx.tlsInsecure },
   });
   try {
     await client.connect();
     await client.logout();
     return true;
   } catch (err) {
-    const msg = String(err?.responseText || err?.message || '');
-    if (/auth|credential|login|password|invalid/i.test(msg) || err?.authenticationFailed) {
-      throw new AppError(401, 'WEBMAIL_AUTH_FAILED', 'Invalid email or password');
-    }
-    throw new AppError(502, 'WEBMAIL_IMAP_UNREACHABLE', `Mail server unreachable: ${msg.slice(0, 160) || 'connection failed'}`);
+    mapImapError(err, 'WEBMAIL_IMAP_UNREACHABLE');
   } finally {
     try {
       client.close();
@@ -42,24 +71,21 @@ export async function verifyMailboxLogin({ host, address, password, tlsInsecure 
   }
 }
 
-async function withImap({ host, address, password, tlsInsecure }, fn) {
-  const ep = mailEndpoints(host, { tlsInsecure });
+async function withImap(ctx, fn) {
   const client = new ImapFlow({
-    ...ep.imap,
-    auth: { user: address, pass: password },
+    host: ctx.host,
+    port: ctx.imapPort ?? 993,
+    secure: true,
+    auth: { user: ctx.address, pass: ctx.password },
     logger: false,
     connectionTimeout: 25_000,
+    tls: { rejectUnauthorized: !ctx.tlsInsecure },
   });
   try {
     await client.connect();
     return await fn(client);
   } catch (err) {
-    if (err instanceof AppError) throw err;
-    const msg = String(err?.responseText || err?.message || '');
-    if (/auth|credential|login|password|invalid/i.test(msg) || err?.authenticationFailed) {
-      throw new AppError(401, 'WEBMAIL_AUTH_FAILED', 'Session expired or credentials rejected');
-    }
-    throw new AppError(502, 'WEBMAIL_IMAP_FAILED', msg.slice(0, 200) || 'IMAP operation failed');
+    mapImapError(err);
   } finally {
     try {
       await client.logout();
@@ -171,13 +197,12 @@ export async function sendMessage(ctx, { to, subject, text, cc }) {
   if (recipients.length > 50) throw new AppError(422, 'TOO_MANY_RECIPIENTS', 'Too many recipients');
   const body = String(text || '');
   if (body.length > MAX_BODY) throw new AppError(413, 'BODY_TOO_LARGE', 'Message body is too large');
-  const ep = mailEndpoints(ctx.host, { tlsInsecure: ctx.tlsInsecure });
   const transport = nodemailer.createTransport({
-    host: ep.smtp.host,
-    port: ep.smtp.port,
+    host: ctx.host,
+    port: ctx.smtpPort ?? 465,
     secure: true,
     auth: { user: ctx.address, pass: ctx.password },
-    tls: ep.smtp.tls,
+    tls: { rejectUnauthorized: !ctx.tlsInsecure },
   });
   try {
     const info = await transport.sendMail({

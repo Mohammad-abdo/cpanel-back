@@ -650,7 +650,8 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         const cred = await loadCredential(serverId);
         const { client } = await connectWith(cred);
         try {
-          return await fn({ run: (script, opts = {}) => execScriptStdin(client, script, opts) });
+          // `client` is exposed for TASK-037 webmail SSH tunnels (IMAP/SMTP to localhost on the VPS).
+          return await fn({ client, run: (script, opts = {}) => execScriptStdin(client, script, opts) });
         } finally {
           client.end();
         }

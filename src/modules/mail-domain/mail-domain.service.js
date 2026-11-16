@@ -116,6 +116,7 @@ export function createMailDomainService({ prisma, now = () => new Date(), auditS
     dnsState: cfg?.dnsState ?? 'pending',
     mailboxCount,
     serverMail: { status: serverMail?.status ?? 'disabled', provisioned: serverMail?.provisioned ?? false },
+    webmailUrl: process.env.WEBMAIL_PUBLIC_URL || 'http://127.0.0.1:5196',
   });
 
   async function readConfig(domainId) {
