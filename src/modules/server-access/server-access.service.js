@@ -115,7 +115,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
 
   async function loadCredential(serverId) {
     const cred = await prisma.serverCredential.findUnique({ where: { serverId } });
-    if (!cred) throw new AppError(404, 'SSH_CREDENTIAL_NOT_FOUND', 'This server has no SSH login saved. Add one first.');
+    if (!cred) throw new AppError(409, 'SSH_CREDENTIAL_NOT_FOUND', 'This server has no SSH login saved. Add one first.');
     return cred;
   }
 
