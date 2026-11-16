@@ -109,6 +109,7 @@ export function createProjectsService({
       const visible = await access.visibleProjectIds(actor);
       return prisma.project.findMany({
         where: {
+          archivedAt: null,
           ...(serverId ? { serverId } : {}),
           ...(visible ? { id: { in: visible } } : {}),
         },

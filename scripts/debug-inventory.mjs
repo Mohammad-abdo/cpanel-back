@@ -3,7 +3,8 @@ import { createSshConnector } from '../src/modules/server-access/ssh.connector.j
 import { decrypt } from '../src/modules/platform/platform.crypto.js';
 import { INVENTORY_SCRIPT, parseInventory } from '../src/modules/server-access/server-inventory.scan.js';
 
-const sid = process.argv[2] || 'a69c02ae-df47-470f-887b-8ec589b215df';
+const sid = process.argv[2] || process.env.NT_SERVER_ID;
+if (!sid) throw new Error('usage: node scripts/debug-inventory.mjs <serverId> (or set NT_SERVER_ID)');
 const cred = await prisma.serverCredential.findUnique({ where: { serverId: sid } });
 if (!cred) throw new Error('no credential');
 const password = decrypt(Buffer.from(cred.secretEnc), process.env.CREDENTIAL_ENCRYPTION_KEY).toString('utf8');

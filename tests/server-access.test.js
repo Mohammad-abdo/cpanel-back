@@ -28,7 +28,9 @@ function fakePrisma() {
         servers.set(s.id, s);
         return s;
       }),
+      update: vi.fn(async ({ where, data }) => Object.assign(servers.get(where.id), data)),
     },
+    serverSnapshot: { create: vi.fn(async ({ data }) => ({ id: randomUUID(), ...data })) },
     serverCredential: {
       findUnique: vi.fn(async ({ where }) => creds.get(where.serverId) ?? null),
       create: vi.fn(async ({ data }) => {

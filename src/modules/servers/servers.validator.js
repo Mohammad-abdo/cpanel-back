@@ -37,13 +37,21 @@ export const updateServerBodySchema = z
 
 export const archiveServerBodySchema = z
   .object({
-    reason: z.string().trim().min(3).max(300),
+    reason: z
+      .string()
+      .trim()
+      .max(300)
+      .optional()
+      .transform((v) => (v && v.length >= 3 ? v : 'Removed from panel')),
   })
   .strict();
 
 export const fleetReadQuerySchema = z
   .object({ serverId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(1000).default(500) })
   .strict();
+
+/** GET /servers/runtimes takes no query parameters; unknown ones are rejected. */
+export const runtimesQuerySchema = z.object({}).strict();
 
 export const metricsQuerySchema = z
   .object({ hours: z.coerce.number().int().min(1).max(168).default(24) })

@@ -2,6 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import path from 'node:path';
 import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
+import { redact } from '../audit/audit.service.js';
 import { statusFromSummary } from '../agents/agents.service.js';
 import { execCommand, execScript, openSftp } from './ssh.connector.js';
 import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
@@ -34,6 +35,15 @@ import {
 } from './pm2-live.scan.js';
 
 const posix = path.posix;
+
+/** Masks credential-looking literals in a SQL preview before it reaches the audit log. */
+export function scrubSqlPreview(sql) {
+  return String(sql)
+    .replace(/(identified\s+(?:with\s+\w+\s+)?by\s+(?:password\s+)?)(['"])(?:(?!\2).)*\2/gi, '$1$2[REDACTED]$2')
+    .replace(/(\b(?:password|passwd|pwd|secret|token|api[-_]?key)\b\s*(?:=|to)?\s*)(['"])(?:(?!\2).)*\2/gi, '$1$2[REDACTED]$2')
+    .slice(0, 200);
+}
+
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 /** Live SQL dump/restore transfer cap (panel download/upload via SSH). */
@@ -733,7 +743,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
               action: mutating ? 'server.db.query.write' : 'server.db.query.read',
               resourceId: serverId,
               result: 'success',
-              after: { engine, db: db || null, mutating, sqlPreview: sql.slice(0, 200), usedLogin: Boolean(login) },
+              after: redact({ engine, db: db || null, mutating, sqlPreview: scrubSqlPreview(sql), usedLogin: Boolean(login) }),
             });
             return {
               engine,

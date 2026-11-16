@@ -7,6 +7,7 @@ import {
   fleetReadQuerySchema,
   listServersQuerySchema,
   metricsQuerySchema,
+  runtimesQuerySchema,
   serverIdParamsSchema,
   updateServerBodySchema,
 } from './servers.validator.js';
@@ -31,7 +32,7 @@ serversRouter.get('/services', requireSession(), validate(fleetReadQuerySchema, 
 serversRouter.get('/ports', requireSession(), validate(fleetReadQuerySchema, 'query'), (req, res, next) => {
   serversController.ports(req, res).catch(next);
 });
-serversRouter.get('/runtimes', requireSession(), (req, res, next) => {
+serversRouter.get('/runtimes', requireSession(), validate(runtimesQuerySchema, 'query'), (req, res, next) => {
   serversController.runtimes(req, res).catch(next);
 });
 

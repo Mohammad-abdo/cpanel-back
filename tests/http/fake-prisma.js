@@ -48,6 +48,8 @@ export function createFakePrisma() {
         const a = proxy.user.rows.find((u) => u.id === row.actorId);
         out.actor = a ? { id: a.id, displayName: a.displayName, email: a.email } : null;
       }
+      if (name === 'project' && args.include.runtime) out.runtime = proxy.projectRuntime.rows.find((r) => r.projectId === row.id) ?? null;
+      if (name === 'projectEnvironment' && args.include.project) out.project = proxy.project.rows.find((r) => r.id === row.projectId) ?? null;
       return out;
     };
     return {

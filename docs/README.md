@@ -38,3 +38,5 @@ Required stack: Node/Express JavaScript and Prisma/MySQL8; React/Vite/JSX, MUI/T
 - [Decisions](DECISIONS.md)
 
 All documentation is English-only. Product Arabic/English localization and RTL/LTR remain requirements. Current implementation is an early health API scaffold; specifications do not imply completed features. English source copies are normalized translations, not byte-identical originals. Original attachments remain in conversation history.
+
+Backend feature reference for the SSH, live DB, PM2, env and inventory workstream (unreviewed, not DONE): [BACKEND-FEATURES.md](BACKEND-FEATURES.md).
