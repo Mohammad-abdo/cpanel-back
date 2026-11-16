@@ -5,6 +5,7 @@ import {
   disableMailDomainBodySchema,
   enableMailDomainBodySchema,
   mailDomainIdParamsSchema,
+  publishMailDnsBodySchema,
   updateMailDomainBodySchema,
 } from './mail-domain.validator.js';
 import { createMailDomainController } from './mail-domain.controller.js';
@@ -28,3 +29,10 @@ mailDomainRouter.post('/:id/mail/enable', write, validate(mailDomainIdParamsSche
 mailDomainRouter.post('/:id/mail/disable', write, validate(mailDomainIdParamsSchema, 'params'), validate(disableMailDomainBodySchema, 'body'), wrap(controller.disable));
 mailDomainRouter.patch('/:id/mail', write, validate(mailDomainIdParamsSchema, 'params'), validate(updateMailDomainBodySchema, 'body'), wrap(controller.update));
 mailDomainRouter.post('/:id/mail/sync', write, validate(mailDomainIdParamsSchema, 'params'), wrap(controller.sync));
+mailDomainRouter.post(
+  '/:id/mail/dns/publish',
+  write,
+  validate(mailDomainIdParamsSchema, 'params'),
+  validate(publishMailDnsBodySchema, 'body'),
+  wrap(controller.publishDns),
+);

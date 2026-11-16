@@ -1,5 +1,8 @@
+import { createHash } from 'node:crypto';
 import { AppError } from '../../common/errors/app-error.js';
 import { createMailAccess, guardSchema, mailDelegate } from '../../common/mail-support.js';
+
+const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 export const DKIM_PLACEHOLDER = 'PENDING_SERVER_KEY_GENERATION';
@@ -43,9 +46,45 @@ export function renderMailDnsRecipe({ domain, mailHostname = null, serverIp = nu
   };
 }
 
-export function createMailDomainService({ prisma, now = () => new Date(), auditService = null, rbac = null, remote = null }) {
+export function createMailDomainService({ prisma, now = () => new Date(), auditService = null, rbac = null, remote = null, platform = null, adapters = null }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const access = createMailAccess({ prisma, rbac, now });
+
+  async function resolveServerIp(domain) {
+    if (!domain.serverId || !prisma.serverCredential?.findUnique) return null;
+    try {
+      const cred = await prisma.serverCredential.findUnique({ where: { serverId: domain.serverId } });
+      if (cred?.host && IPV4.test(cred.host)) return cred.host;
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  async function buildDnsChecklist(domain, cfg) {
+    let mailHostname = null;
+    if (domain.serverId && prisma.serverMailService?.findUnique) {
+      try {
+        mailHostname = (await prisma.serverMailService.findUnique({ where: { serverId: domain.serverId } }))?.mailHostname ?? null;
+      } catch {
+        /* degrade */
+      }
+    }
+    const serverIp = await resolveServerIp(domain);
+    const recipe = renderMailDnsRecipe({
+      domain: domain.name,
+      mailHostname,
+      serverIp,
+      selector: cfg?.dkimSelector ?? 'nt1',
+      dkimPublicKey: cfg?.dkimPublicKey ?? null,
+    });
+    const existing = domain.dnsRecords ?? [];
+    const records = recipe.records.map((r) => {
+      const hit = existing.find((e) => e.type === r.type && (e.name === r.name || (r.name === '@' && e.name === domain.name)));
+      return { ...r, present: Boolean(hit), matches: hit ? hit.valueSummary === r.value : false };
+    });
+    return { ...recipe, enabled: cfg?.enabled ?? false, dnsState: cfg?.dnsState ?? 'pending', records, webmailUrl: process.env.WEBMAIL_PUBLIC_URL || 'http://127.0.0.1:5196' };
+  }
 
   /** Push virtual domain + DKIM generation to a provisioned server. Never throws: panel state stays authoritative (metadata-only fallback). */
   async function pushDomain(domain, cfg, actor) {
@@ -176,27 +215,93 @@ export function createMailDomainService({ prisma, now = () => new Date(), auditS
     async dns(domainId, actor) {
       const domain = await access.loadDomain(domainId, actor);
       const { cfg } = await readConfig(domainId);
-      let mailHostname = null;
-      if (domain.serverId && prisma.serverMailService?.findUnique) {
-        try {
-          mailHostname = (await prisma.serverMailService.findUnique({ where: { serverId: domain.serverId } }))?.mailHostname ?? null;
-        } catch {
-          /* degrade */
-        }
+      return buildDnsChecklist(domain, cfg);
+    },
+
+    /**
+     * Publish ready mail DNS records (skip placeholders) through platform.gate + DNS adapter.
+     * Stores panel DnsRecord rows on success and sets dnsState=published.
+     */
+    async publishDns(domainId, input, actor) {
+      if (!platform?.gate) throw new AppError(500, 'PLATFORM_UNAVAILABLE', 'Approval gate is not wired');
+      if (!adapters?.dns) throw new AppError(500, 'DNS_ADAPTER_UNAVAILABLE', 'DNS adapter is not wired');
+      const domain = await access.loadDomain(domainId, actor);
+      await access.requireWrite(actor, domain);
+      const { cfg } = await readConfig(domainId);
+      if (!cfg?.enabled) throw new AppError(409, 'MAIL_DOMAIN_NOT_ENABLED', 'Enable mail for this domain first');
+      const checklist = await buildDnsChecklist(domain, cfg);
+      const toPublish = checklist.records.filter((r) => r.status === 'ready' && (!r.present || !r.matches));
+      if (!toPublish.length) {
+        return { published: 0, skipped: checklist.records.length, alreadyOk: true, dnsState: cfg.dnsState, webmailUrl: checklist.webmailUrl };
       }
-      const recipe = renderMailDnsRecipe({
-        domain: domain.name,
-        mailHostname,
-        serverIp: domain.server?.hostname ?? null,
-        selector: cfg?.dkimSelector ?? 'nt1',
-        dkimPublicKey: cfg?.dkimPublicKey ?? null,
+      const impact = toPublish.map((r) => `Upsert ${r.type} ${r.name} → ${String(r.value).slice(0, 96)}`);
+      const binding = sha256(JSON.stringify(toPublish.map((r) => [r.type, r.name, r.value, r.ttl])));
+      const gate = await platform.gate(
+        {
+          action: 'mail.dns.publish',
+          binding,
+          resourceType: 'domain',
+          resourceId: domainId,
+          approvalId: input.approvalId,
+          reason: input.reason,
+          impact,
+          rollbackPlan: input.rollbackNote,
+          context: { environmentId: domain.environmentId ?? null },
+        },
+        actor,
+      );
+      if (!gate.proceed) return { approvalRequired: true, approval: gate.approval, impact, count: toPublish.length };
+
+      const saved = [];
+      try {
+        for (const r of toPublish) {
+          const record = { type: r.type, name: r.name, value: r.value, ttl: r.ttl };
+          await adapters.dns.upsert(record);
+          const existing = (domain.dnsRecords ?? []).find((e) => e.type === r.type && e.name === r.name);
+          let row;
+          if (existing) {
+            row = await prisma.dnsRecord.update({
+              where: { id: existing.id },
+              data: { valueSummary: r.value.slice(0, 255), ttl: r.ttl },
+            });
+          } else {
+            row = await prisma.dnsRecord.create({
+              data: { domainId, type: r.type, name: r.name, valueSummary: r.value.slice(0, 255), ttl: r.ttl },
+            });
+          }
+          saved.push(row);
+        }
+        await guardSchema(() =>
+          mailDelegate(prisma, 'domainMailConfig').update({ where: { domainId }, data: { dnsState: 'published' } }),
+        );
+      } catch (e) {
+        if (input.approvalId && platform.releaseFailedExecution) await platform.releaseFailedExecution(input.approvalId, actor);
+        await audit({
+          actorId: actor.id,
+          action: 'mail.dns.publish',
+          resourceType: 'domain',
+          resourceId: domainId,
+          result: 'failure',
+          metadata: { code: e?.code ?? 'ERROR' },
+        });
+        if (e instanceof AppError) throw e;
+        throw new AppError(502, 'DNS_PROVIDER_FAILED', 'DNS provider rejected a mail record; remaining records were not applied');
+      }
+
+      await audit({
+        actorId: actor.id,
+        action: 'mail.dns.publish',
+        resourceType: 'domain',
+        resourceId: domainId,
+        result: 'success',
+        after: { count: saved.length, types: toPublish.map((r) => r.type) },
       });
-      const existing = domain.dnsRecords ?? [];
-      const records = recipe.records.map((r) => {
-        const hit = existing.find((e) => e.type === r.type && (e.name === r.name || (r.name === '@' && e.name === domain.name)));
-        return { ...r, present: Boolean(hit), matches: hit ? hit.valueSummary === r.value : false };
-      });
-      return { ...recipe, enabled: cfg?.enabled ?? false, dnsState: cfg?.dnsState ?? 'pending', records };
+      return {
+        published: saved.length,
+        simulated: Boolean(adapters.simulated),
+        dnsState: 'published',
+        webmailUrl: checklist.webmailUrl,
+      };
     },
   };
 }

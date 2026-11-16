@@ -69,6 +69,112 @@ export const INFO_SCRIPT = [
   "echo '##ports'; ss -tulnH 2>/dev/null | head -n 200",
 ].join('; ');
 
+/**
+ * Fixed read-only htop-style snapshot (no TTY, no interactive htop binary required).
+ * Two /proc/stat samples (~350ms apart) give per-CPU usage; process list is capped.
+ */
+export const HTOP_SCRIPT = [
+  "echo '##hostname'; hostname",
+  "echo '##uptime'; cut -d' ' -f1 /proc/uptime",
+  "echo '##load'; cat /proc/loadavg",
+  "echo '##cpus'; nproc",
+  "echo '##mem'; free -b | awk 'NR==2{print $2,$3,$4,$6,$7}'",
+  "echo '##swap'; free -b | awk 'NR==3{print $2,$3}'",
+  "echo '##tasks'; ps -e --no-headers 2>/dev/null | wc -l",
+  "echo '##cpusnap1'; grep -E '^cpu[0-9]* ' /proc/stat | head -n 65",
+  'sleep 0.35',
+  "echo '##cpusnap2'; grep -E '^cpu[0-9]* ' /proc/stat | head -n 65",
+  "echo '##procs'; ps -eo pid=,user:16=,state=,pcpu=,pmem=,rss=,etime=,comm:32=,args:100= --sort=-pcpu 2>/dev/null | head -n 80",
+].join('; ');
+
+function parseCpuStatLines(lines = []) {
+  const out = [];
+  for (const line of lines) {
+    const p = line.trim().split(/\s+/);
+    if (!p[0] || !/^cpu[0-9]*$/.test(p[0])) continue;
+    const nums = p.slice(1).map((n) => Number(n)).filter((n) => Number.isFinite(n));
+    if (nums.length < 4) continue;
+    const idle = (nums[3] || 0) + (nums[4] || 0);
+    const total = nums.reduce((a, b) => a + b, 0);
+    out.push({ id: p[0], idle, total });
+  }
+  return out;
+}
+
+/** Delta two /proc/stat snapshots into usage percent (0–100). */
+export function cpuUsageFromSnaps(snap1, snap2) {
+  const a = parseCpuStatLines(snap1);
+  const b = parseCpuStatLines(snap2);
+  const byId = new Map(a.map((r) => [r.id, r]));
+  return b
+    .map((row) => {
+      const prev = byId.get(row.id);
+      if (!prev) return null;
+      const dTotal = row.total - prev.total;
+      const dIdle = row.idle - prev.idle;
+      if (dTotal <= 0) return { id: row.id, usage: 0 };
+      const usage = Math.max(0, Math.min(100, (1 - dIdle / dTotal) * 100));
+      return { id: row.id, usage: Math.round(usage * 10) / 10 };
+    })
+    .filter(Boolean);
+}
+
+/** Parses HTOP_SCRIPT stdout into a structured live process board. */
+export function parseHtopSnapshot(text) {
+  const sec = {};
+  let cur = null;
+  for (const line of String(text).split('\n')) {
+    const m = /^##(\w+)$/.exec(line.trim());
+    if (m) {
+      cur = m[1];
+      sec[cur] = [];
+    } else if (cur && line.trim()) sec[cur].push(line.trim());
+  }
+  const ws = /\s+/;
+  const num = (v) => (v !== undefined && v !== '' && Number.isFinite(Number(v)) ? Number(v) : null);
+  const load = (sec.load?.[0] ?? '').split(ws);
+  const memParts = (sec.mem?.[0] ?? '').split(ws).map(num);
+  const swapParts = (sec.swap?.[0] ?? '').split(ws).map(num);
+  const cpus = cpuUsageFromSnaps(sec.cpusnap1 ?? [], sec.cpusnap2 ?? []);
+  const all = cpus.find((c) => c.id === 'cpu');
+  const cores = cpus.filter((c) => c.id !== 'cpu');
+  const processes = (sec.procs ?? []).map((l) => {
+    // pid user state pcpu pmem rss etime comm args...
+    const parts = l.trim().split(ws);
+    if (parts.length < 8) return null;
+    const [pid, user, state, pcpu, pmem, rss, etime, comm, ...args] = parts;
+    return {
+      pid: num(pid),
+      user,
+      state,
+      cpu: num(pcpu),
+      mem: num(pmem),
+      rss: num(rss),
+      etime,
+      command: comm,
+      args: args.join(' ').slice(0, 200),
+    };
+  }).filter(Boolean);
+
+  return {
+    hostname: sec.hostname?.[0] ?? null,
+    uptimeSec: num(sec.uptime?.[0]) === null ? null : Math.floor(num(sec.uptime[0])),
+    load: { m1: num(load[0]), m5: num(load[1]), m15: num(load[2]) },
+    cpuCount: num(sec.cpus?.[0]),
+    cpu: { all: all?.usage ?? null, cores },
+    memory: {
+      total: memParts[0] ?? null,
+      used: memParts[1] ?? null,
+      free: memParts[2] ?? null,
+      buffCache: memParts[3] ?? null,
+      available: memParts[4] ?? null,
+    },
+    swap: { total: swapParts[0] ?? null, used: swapParts[1] ?? null },
+    taskCount: num(sec.tasks?.[0]),
+    processes,
+  };
+}
+
 /** Parses INFO_SCRIPT output into structured data. Unknown or missing sections stay empty. */
 export function parseServerInfo(text) {
   const sec = {};
@@ -513,6 +619,22 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             throw new AppError(404, 'PM2_NOT_FOUND', 'pm2 is not installed or not on PATH for the SSH user');
           }
           return parsed;
+        } finally {
+          client.end();
+        }
+      });
+    },
+
+    /** Live htop-style process board over SSH (Owner MFA). Read-only; no interactive TTY. */
+    async htop(serverId, actor) {
+      requireOwner(actor);
+      const cred = await loadCredential(serverId);
+      return withSshLock(serverId, async () => {
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execCommand(client, HTOP_SCRIPT, { maxBytes: 768 * 1024, timeoutMs: 45_000 });
+          if (res.timedOut) throw new AppError(504, 'SSH_HTOP_TIMEOUT', 'Process snapshot over SSH timed out');
+          return { ...parseHtopSnapshot(res.stdout), collectedAt: now().toISOString() };
         } finally {
           client.end();
         }

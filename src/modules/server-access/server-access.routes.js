@@ -52,6 +52,7 @@ serverAccessRouter.get('/:id/ssh/info', owner, params, wrap(c.info));
 serverAccessRouter.post('/:id/ssh/service', owner, params, validate(serviceBodySchema, 'body'), wrap(c.service));
 serverAccessRouter.get('/:id/ssh/pm2', owner, params, wrap(c.pm2List));
 serverAccessRouter.post('/:id/ssh/pm2', owner, params, validate(pm2BodySchema, 'body'), wrap(c.pm2Control));
+serverAccessRouter.get('/:id/ssh/htop', owner, params, wrap(c.htop));
 
 const dbParams = validate(dbEngineParamsSchema, 'params');
 serverAccessRouter.get('/:id/ssh/db/:engine/schemas', owner, dbParams, wrap(c.dbSchemas));

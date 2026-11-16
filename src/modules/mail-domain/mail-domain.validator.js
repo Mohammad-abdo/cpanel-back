@@ -19,6 +19,14 @@ export const enableMailDomainBodySchema = z
 
 export const disableMailDomainBodySchema = z.object({ reason: z.string().min(5).max(500).optional() }).strict();
 
+export const publishMailDnsBodySchema = z
+  .object({
+    reason: z.string().trim().min(5).max(500),
+    rollbackNote: z.string().trim().min(5).max(500),
+    approvalId: z.string().uuid().optional(),
+  })
+  .strict();
+
 export const updateMailDomainBodySchema = z
   .object({
     quotaDefaultMb: quotaMb.optional(),

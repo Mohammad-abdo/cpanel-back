@@ -26,6 +26,7 @@ export const ACTION_RISK = Object.freeze({
   // Phase 10 mail (TASK-034/035): apply is closed by default; firewall exposure is critical.
   'mail.provision.apply': RISK.HIGH,
   'mail.firewall.open': RISK.CRITICAL,
+  'mail.dns.publish': RISK.HIGH,
 });
 
 export const requiresApproval = (action) => {

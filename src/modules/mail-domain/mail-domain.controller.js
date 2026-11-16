@@ -1,3 +1,5 @@
+import { respond } from '../platform/platform.http.js';
+
 export function createMailDomainController(service) {
   return {
     async get(req, res) {
@@ -17,6 +19,9 @@ export function createMailDomainController(service) {
     },
     async dns(req, res) {
       res.status(200).json({ data: await service.dns(req.validated.params.id, req.user) });
+    },
+    async publishDns(req, res) {
+      respond(res, await service.publishDns(req.validated.params.id, req.validated.body, req.user));
     },
   };
 }

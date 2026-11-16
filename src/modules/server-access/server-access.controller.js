@@ -59,6 +59,9 @@ export function createServerAccessController(svc) {
     async pm2Control(req, res) {
       respond(res, await svc.pm2Control(id(req), req.validated.body, req.user));
     },
+    async htop(req, res) {
+      res.status(200).json({ data: await svc.htop(id(req), req.user) });
+    },
     async ticket(req, res) {
       res.status(201).json({ data: await svc.createTicket(id(req), req.user) });
     },

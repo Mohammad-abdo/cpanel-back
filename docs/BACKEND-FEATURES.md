@@ -45,6 +45,7 @@ All routes use `owner` and a UUID `:id` params schema, except the first.
 | POST | `/:id/ssh/service` | `name` (`[A-Za-z0-9@._-]{1,100}`), `action` start/stop/restart/reload/status/enable/disable | `systemctl`. Audit `server.service.<action>` with exit code. |
 | GET | `/:id/ssh/pm2` | none | `pm2 jlist` (tries several PM2 homes, nvm paths, sudo -n). 404 `PM2_NOT_FOUND`, 504 `PM2_TIMEOUT`. |
 | POST | `/:id/ssh/pm2` | `name` (`[A-Za-z0-9._:-]{1,100}`), `action` start/stop/restart/reload/delete/logs/describe | PM2 control; audit `server.pm2.<action>`. stop/restart/reload are High risk and gated by `platform.gate` (action `pm2.<action>`, resource `server`, binding = process name): optional `reason`, `rollbackNote`, `approvalId`; 202 `{approvalRequired, approvalId}` until a different person approves, then replay with `approvalId`. start/delete/logs/describe are not gated. |
+| GET | `/:id/ssh/htop` | none | Fixed `HTOP_SCRIPT` over SSH (two `/proc/stat` samples + `ps` top 80). Returns load, memory/swap, per-CPU %, process rows. Read-only; no interactive TTY and no kill/renice. 504 `SSH_HTOP_TIMEOUT`. UI: server detail **Htop** tab (`HtopPanel`). |
 | GET | `/:id/ssh/db/:engine/schemas` | `engine` mysql or postgres | Lists schemas. |
 | GET | `/:id/ssh/db/:engine/tables` | query `db` | Lists tables. |
 | GET | `/:id/ssh/db/:engine/columns` | query `db`, `table` | Columns. |
