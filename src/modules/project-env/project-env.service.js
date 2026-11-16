@@ -10,6 +10,25 @@ export const MAX_VARS = 500;
 const SECRET_HINT = /(SECRET|PASSWORD|PASSWD|PWD|TOKEN|PRIVATE|CREDENTIAL|API_?KEY|ACCESS_?KEY|_KEY$|DSN|DATABASE_URL)/i;
 export const looksSecret = (key) => SECRET_HINT.test(key);
 
+/** Best-effort DB name from common .env keys (never returns credentials). */
+export function guessDbName(vars) {
+  const map = Object.fromEntries((vars ?? []).map((v) => [v.key, v.value]));
+  for (const k of ['DB_NAME', 'MYSQL_DATABASE', 'POSTGRES_DB', 'DATABASE_NAME', 'PGDATABASE']) {
+    if (map[k] && /^[A-Za-z0-9_-]{1,64}$/.test(map[k])) return { name: map[k], source: k };
+  }
+  const url = map.DATABASE_URL || map.MYSQL_URL || map.POSTGRES_URL;
+  if (typeof url === 'string') {
+    try {
+      const u = new URL(url.replace(/^jdbc:/, ''));
+      const name = decodeURIComponent((u.pathname || '').replace(/^\//, '').split('?')[0] || '');
+      if (name && /^[A-Za-z0-9_-]{1,64}$/.test(name)) return { name, source: 'DATABASE_URL' };
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 /** Parses .env text: KEY=VALUE, optional `export`, # comments, single/double quotes, \n escapes in double quotes. */
 export function parseDotenv(text) {
   const out = [];
@@ -149,6 +168,55 @@ export function createProjectEnvService({ prisma, rbac, auditService = null, ser
       const res = await serverAccess.write(env.project.serverId, { path, content: text }, actor);
       await audit({ actorId: actor.id, action: 'project.env.write_server', resourceId: projectId, environmentId, result: 'success', after: { path: res.path, count: rows.length } });
       return { path: res.path, count: rows.length };
+    },
+
+    /**
+     * Pulls a .env (or similar) file from the project server over SFTP.
+     * Defaults to runtime.discoveredPath/.env when path is omitted.
+     */
+    async pullFromServer(projectId, environmentId, { path: rawPath, import: doImport = false, markSecrets = true } = {}, actor) {
+      const env = await load(projectId, environmentId);
+      await can(actor, env, PERMISSIONS.PROJECT_CONFIGURE);
+      if (!serverAccess?.read) throw new AppError(501, 'SSH_UNAVAILABLE', 'Server access is not configured');
+      let path = rawPath;
+      if (!path) {
+        const runtime = await prisma.projectRuntime.findUnique({ where: { projectId } });
+        const root = runtime?.metaJson?.discoveredPath;
+        if (!root || typeof root !== 'string' || !root.startsWith('/')) {
+          throw new AppError(409, 'PROJECT_PATH_UNKNOWN', 'No discovered project path. Provide an absolute .env path or re-run inventory.');
+        }
+        path = `${String(root).replace(/\/+$/, '')}/.env`;
+      }
+      const file = await serverAccess.read(env.project.serverId, path, actor);
+      if (file.tooLarge) throw new AppError(413, 'ENV_FILE_TOO_LARGE', 'Remote .env is larger than 1 MB');
+      if (file.binary || file.content == null) throw new AppError(422, 'ENV_FILE_BINARY', 'Remote file is not readable text');
+      const text = String(file.content);
+      const parsed = parseDotenv(text);
+      let imported = null;
+      if (doImport) {
+        if (!parsed.vars.length) throw new AppError(422, 'ENV_IMPORT_EMPTY', 'Remote file has no KEY=VALUE lines to import');
+        imported = await upsertMany(
+          env,
+          parsed.vars.map((v) => ({ ...v, isSecret: markSecrets && looksSecret(v.key) })),
+          actor,
+        );
+      }
+      await audit({
+        actorId: actor.id,
+        action: 'project.env.pull_server',
+        resourceId: projectId,
+        environmentId,
+        result: 'success',
+        after: { path: file.path, bytes: file.size, keys: parsed.vars.length, imported: Boolean(doImport) },
+      });
+      return {
+        path: file.path,
+        text,
+        size: file.size,
+        keys: parsed.vars.map((v) => v.key),
+        guessedDb: guessDbName(parsed.vars),
+        imported,
+      };
     },
 
     /** Adds an environment (staging, development, ...) to an existing project. */

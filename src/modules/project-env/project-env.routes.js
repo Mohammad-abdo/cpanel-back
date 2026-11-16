@@ -12,6 +12,7 @@ import {
   importBodySchema,
   projectParamsSchema,
   setVarsBodySchema,
+  pullServerBodySchema,
   writeServerBodySchema,
 } from './project-env.validator.js';
 
@@ -32,5 +33,6 @@ projectEnvRouter.put('/:id/environments/:envId/vars', bigJson, write, env, valid
 projectEnvRouter.post('/:id/environments/:envId/vars/import', bigJson, write, env, validate(importBodySchema, 'body'), wrap(c.importText));
 projectEnvRouter.get('/:id/environments/:envId/vars/export', write, env, wrap(c.exportText));
 projectEnvRouter.post('/:id/environments/:envId/vars/write-server', write, env, validate(writeServerBodySchema, 'body'), wrap(c.writeToServer));
+projectEnvRouter.post('/:id/environments/:envId/vars/pull-server', write, env, validate(pullServerBodySchema, 'body'), wrap(c.pullFromServer));
 projectEnvRouter.get('/:id/environments/:envId/vars/:key/reveal', write, envKey, wrap(c.reveal));
 projectEnvRouter.delete('/:id/environments/:envId/vars/:key', write, envKey, wrap(c.remove));

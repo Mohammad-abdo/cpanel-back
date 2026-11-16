@@ -24,6 +24,10 @@ export function createProjectEnvController(svc) {
     async writeToServer(req, res) {
       res.status(200).json({ data: await svc.writeToServer(p(req).id, p(req).envId, req.validated.body, req.user) });
     },
+    async pullFromServer(req, res) {
+      res.set('Cache-Control', 'no-store');
+      res.status(200).json({ data: await svc.pullFromServer(p(req).id, p(req).envId, req.validated.body, req.user) });
+    },
     async addEnvironment(req, res) {
       res.status(201).json({ data: await svc.addEnvironment(p(req).id, req.validated.body, req.user) });
     },
