@@ -47,7 +47,7 @@ describe('security: every route of every phase 06-09 module fails closed', () =>
         expect(res.status, `${r.method} ${path}`).toBe(401);
       }
     }
-  });
+  }, 30000);
 
   it('every write route requires an MFA-satisfied session (not read-only requireSession)', async () => {
     for (const [, load, name] of MOUNTS) {

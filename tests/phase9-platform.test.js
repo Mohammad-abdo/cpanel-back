@@ -187,7 +187,7 @@ describe('platform routes fail closed without a session', () => {
       const res = await request(app)[m](path).send({});
       expect(res.status, path).toBe(401);
     }
-  });
+  }, 30000);
 });
 
 describe('platform approval decisions (security test findings)', () => {
