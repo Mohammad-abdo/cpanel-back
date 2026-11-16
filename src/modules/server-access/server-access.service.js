@@ -400,12 +400,16 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     async scanInventory(serverId, actor) {
       requireOwner(actor);
       const cred = await loadCredential(serverId);
-      const { client } = await connectWith(cred);
+      let client;
       try {
+        ({ client } = await connectWith(cred));
         const res = await execScript(client, INVENTORY_SCRIPT, {
           maxBytes: 768 * 1024,
-          timeoutMs: 60_000,
+          timeoutMs: 90_000,
         });
+        if (res.timedOut) {
+          throw new AppError(504, 'INVENTORY_TIMEOUT', 'Inventory scan timed out on the server. Retry in a moment.');
+        }
         const inventory = parseInventory(res.stdout);
         inventory.debug = {
           bytes: res.stdout?.length ?? 0,
@@ -423,10 +427,17 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             databases: inventory.databases.length,
             bytes: inventory.debug.bytes,
           },
-        });
+        }).catch(() => null);
         return inventory;
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        throw new AppError(502, 'INVENTORY_SCAN_FAILED', err?.message || 'Inventory scan failed');
       } finally {
-        client.end();
+        try {
+          client?.end();
+        } catch {
+          /* ignore close errors after disconnect */
+        }
       }
     },
 
