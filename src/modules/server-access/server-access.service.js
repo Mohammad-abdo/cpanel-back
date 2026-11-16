@@ -476,10 +476,26 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           const run = async (command) => {
             const res = await execCommand(client, command, { maxBytes: 512 * 1024, timeoutMs: 60_000 });
             if (res.timedOut) throw new AppError(504, 'DB_LIVE_TIMEOUT', 'Database command over SSH timed out');
-            if (res.code !== 0 && !String(res.stdout || '').trim()) {
-              throw new AppError(502, 'DB_LIVE_FAILED', 'Database CLI returned no data (missing client auth or privileges?)');
+            const stdout = String(res.stdout || '');
+            const stderr = String(res.stderr || '');
+            if (res.code !== 0 && !stdout.trim()) {
+              const hint = stderr
+                .replace(/__NT_ERR__/g, '')
+                .trim()
+                .split('\n')
+                .filter(Boolean)
+                .slice(-3)
+                .join(' | ')
+                .slice(0, 280);
+              throw new AppError(
+                502,
+                'DB_LIVE_FAILED',
+                hint
+                  ? `Database CLI failed: ${hint}`
+                  : 'Database CLI returned no data (missing sudo/debian.cnf privileges for MySQL?)',
+              );
             }
-            return res.stdout || '';
+            return stdout;
           };
           const parse = (text) => (engine === 'mysql' ? parseMysqlBatch(text) : parsePsqlAligned(text));
 

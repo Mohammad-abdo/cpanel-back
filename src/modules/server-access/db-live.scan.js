@@ -36,15 +36,24 @@ function pgIdent(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
 }
 
-/** Build a mysql CLI invocation that tries debian.cnf, sudo mysql, then plain mysql. */
+/**
+ * MySQL/MariaDB CLI with several auth fallbacks. Last stderr is printed with __NT_ERR__
+ * so the API can surface a useful privilege error instead of an empty 502.
+ */
 export function mysqlCmd(sql, db = null) {
   const q = shQuote(sql);
   const dbArg = db ? ` ${shQuote(assertSafeDbName(db))}` : '';
-  return (
-    `(mysql --defaults-file=/etc/mysql/debian.cnf --batch --raw --default-character-set=utf8mb4${dbArg} -e ${q} 2>/dev/null` +
-    ` || sudo -n mysql --batch --raw --default-character-set=utf8mb4${dbArg} -e ${q} 2>/dev/null` +
-    ` || mysql --batch --raw --default-character-set=utf8mb4${dbArg} -e ${q} 2>/dev/null)`
-  );
+  const flags = `--batch --raw --default-character-set=utf8mb4${dbArg} -e ${q}`;
+  const attempts = [
+    `mysql --defaults-file=/etc/mysql/debian.cnf ${flags}`,
+    `sudo -n mysql --defaults-file=/etc/mysql/debian.cnf ${flags}`,
+    `sudo -n mysql ${flags}`,
+    `mariadb --defaults-file=/etc/mysql/debian.cnf ${flags}`,
+    `sudo -n mariadb ${flags}`,
+    `mysql ${flags}`,
+  ];
+  // Run attempts until one prints rows; keep last stderr for diagnostics.
+  return `ERRFILE=$(mktemp); OUT=""; for __cmd in ${attempts.map(shQuote).join(' ')}; do OUT=$(sh -c "$__cmd" 2>"$ERRFILE") && break; OUT=""; done; printf '%s' "$OUT"; if [ -z "$OUT" ]; then printf '\\n__NT_ERR__%s' "$(tr '\\n' ' ' <"$ERRFILE")" >&2; fi; rm -f "$ERRFILE"; [ -n "$OUT" ]`;
 }
 
 export function postgresCmd(sql) {

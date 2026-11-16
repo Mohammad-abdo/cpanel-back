@@ -59,17 +59,20 @@ export function execCommand(client, command, { maxBytes = 64 * 1024, timeoutMs =
     client.exec(command, (err, stream) => {
       if (err) return reject(new AppError(502, 'SSH_EXEC_FAILED', 'Could not run the command over SSH'));
       let out = '';
+      let errOut = '';
       const timer = setTimeout(() => {
         stream.close();
-        resolve({ code: null, stdout: out, timedOut: true });
+        resolve({ code: null, stdout: out, stderr: errOut, timedOut: true });
       }, timeoutMs);
       stream.on('data', (d) => {
         if (out.length < maxBytes) out += d.toString('utf8');
       });
-      stream.stderr.on('data', () => {});
+      stream.stderr.on('data', (d) => {
+        if (errOut.length < 8 * 1024) errOut += d.toString('utf8');
+      });
       stream.on('close', (code) => {
         clearTimeout(timer);
-        resolve({ code, stdout: out.slice(0, maxBytes) });
+        resolve({ code, stdout: out.slice(0, maxBytes), stderr: errOut.slice(0, 8 * 1024) });
       });
     });
   });
