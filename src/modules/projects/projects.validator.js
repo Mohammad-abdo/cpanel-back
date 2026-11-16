@@ -74,12 +74,22 @@ export const linkBodySchema = z.object({ environments: environmentsSchema }).str
 /** Secret values are never accepted: only reference names. `.strict()` rejects any other key. */
 export const configureBodySchema = z
   .object({
+    name: z.string().trim().min(2).max(120).optional(),
     type: z.enum(PROJECT_TYPES).optional(),
     repository: repositorySchema.optional(),
     runtime: runtimeSchema.optional(),
     secretRefs: z.array(z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/)).max(100).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (v) =>
+      v.name !== undefined ||
+      v.type !== undefined ||
+      v.repository !== undefined ||
+      v.runtime !== undefined ||
+      v.secretRefs !== undefined,
+    { message: 'At least one field is required' },
+  );
 
 export const lifecycleBodySchema = z
   .object({

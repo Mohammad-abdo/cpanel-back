@@ -2,11 +2,13 @@ import { Router } from 'express';
 import { validate } from '../../common/middleware/validate.js';
 import { requireSession } from '../../common/middleware/require-session.js';
 import {
+  archiveServerBodySchema,
   createServerBodySchema,
   fleetReadQuerySchema,
   listServersQuerySchema,
   metricsQuerySchema,
   serverIdParamsSchema,
+  updateServerBodySchema,
 } from './servers.validator.js';
 import { createServersController } from './servers.controller.js';
 import { createServersService } from './servers.service.js';
@@ -40,6 +42,26 @@ serversRouter.post('/', requireSession({ requireMfa: true }), validate(createSer
 serversRouter.get('/:id', requireSession(), validate(serverIdParamsSchema, 'params'), (req, res, next) => {
   serversController.get(req, res).catch(next);
 });
+
+serversRouter.patch(
+  '/:id',
+  requireSession({ requireMfa: true }),
+  validate(serverIdParamsSchema, 'params'),
+  validate(updateServerBodySchema, 'body'),
+  (req, res, next) => {
+    serversController.update(req, res).catch(next);
+  },
+);
+
+serversRouter.post(
+  '/:id/archive',
+  requireSession({ requireMfa: true }),
+  validate(serverIdParamsSchema, 'params'),
+  validate(archiveServerBodySchema, 'body'),
+  (req, res, next) => {
+    serversController.archive(req, res).catch(next);
+  },
+);
 
 serversRouter.post(
   '/:id/enrollment',

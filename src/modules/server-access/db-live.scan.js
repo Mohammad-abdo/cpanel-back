@@ -5,7 +5,7 @@
 
 export const SAFE_ENGINE = new Set(['mysql', 'postgres']);
 export const SAFE_IDENT = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-export const SAFE_DB_NAME = /^[A-Za-z0-9_]{1,64}$/;
+export const SAFE_DB_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
 const SYSTEM_MYSQL = new Set(['information_schema', 'mysql', 'performance_schema', 'sys']);
 const SYSTEM_PG = new Set(['template0', 'template1', 'postgres']);
@@ -108,10 +108,9 @@ export function listTablesSql(engine, db) {
     return `SELECT TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine, TABLE_ROWS AS approx_rows
 FROM information_schema.TABLES WHERE TABLE_SCHEMA = '${db}' ORDER BY TABLE_NAME`;
   }
-  return `SELECT c.relname AS name, CASE c.relkind WHEN 'r' THEN 'BASE TABLE' WHEN 'v' THEN 'VIEW' ELSE c.relkind::text END AS type
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind IN ('r','v','p') AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-AND current_database() = '${db}'
+  return `SELECT tablename AS name, 'BASE TABLE' AS type FROM pg_tables WHERE schemaname = 'public'
+UNION ALL
+SELECT viewname AS name, 'VIEW' AS type FROM pg_views WHERE schemaname = 'public'
 ORDER BY 1`;
 }
 

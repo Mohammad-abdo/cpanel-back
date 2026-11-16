@@ -67,6 +67,54 @@ export function createServersService({ prisma, now = () => new Date(), auditServ
       return server;
     },
 
+    async update(id, input, actor) {
+      requireOwner(actor);
+      const server = await prisma.server.findUnique({ where: { id } });
+      if (!server || server.archivedAt) throw new AppError(404, 'SERVER_NOT_FOUND', 'Server not found');
+      if (input.alias && input.alias !== server.alias) {
+        const dup = await prisma.server.findUnique({ where: { alias: input.alias } });
+        if (dup) throw new AppError(409, 'SERVER_EXISTS', 'Server alias already exists');
+      }
+      const data = {};
+      if (input.alias !== undefined) data.alias = input.alias;
+      if (input.hostname !== undefined) data.hostname = input.hostname;
+      const updated = await prisma.server.update({ where: { id }, data });
+      await audit({
+        actorId: actor.id,
+        action: 'server.update',
+        resourceType: 'server',
+        resourceId: id,
+        result: 'success',
+        after: data,
+      });
+      return this.getById(id, actor).catch(() => updated);
+    },
+
+    /** Soft-delete: archives the server and any non-archived projects on it. */
+    async archive(id, input, actor) {
+      requireOwner(actor);
+      const server = await prisma.server.findUnique({ where: { id } });
+      if (!server || server.archivedAt) throw new AppError(404, 'SERVER_NOT_FOUND', 'Server not found');
+      const stamp = now();
+      const projectResult = await prisma.project.updateMany({
+        where: { serverId: id, archivedAt: null },
+        data: { status: 'archived', archivedAt: stamp },
+      });
+      const updated = await prisma.server.update({
+        where: { id },
+        data: { archivedAt: stamp, status: 'unknown' },
+      });
+      await audit({
+        actorId: actor.id,
+        action: 'server.archive',
+        resourceType: 'server',
+        resourceId: id,
+        result: 'success',
+        after: { reason: input.reason, projectsArchived: projectResult.count },
+      });
+      return { ...updated, projectsArchived: projectResult.count };
+    },
+
     /** One-time token, stored hashed, shown once, valid for one hour. */
     async issueEnrollment(serverId, actor) {
       requireOwner(actor);

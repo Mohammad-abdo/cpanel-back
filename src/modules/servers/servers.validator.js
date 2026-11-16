@@ -13,15 +13,31 @@ export const serverIdParamsSchema = z
   })
   .strict();
 
+const aliasField = z
+  .string()
+  .trim()
+  .min(2)
+  .max(80)
+  .regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase letters, digits and dashes');
+
 export const createServerBodySchema = z
   .object({
-    alias: z
-      .string()
-      .trim()
-      .min(2)
-      .max(80)
-      .regex(/^[a-z0-9][a-z0-9-]*$/, 'lowercase letters, digits and dashes'),
+    alias: aliasField,
     hostname: z.string().trim().max(255).optional(),
+  })
+  .strict();
+
+export const updateServerBodySchema = z
+  .object({
+    alias: aliasField.optional(),
+    hostname: z.string().trim().max(255).nullable().optional(),
+  })
+  .strict()
+  .refine((v) => v.alias !== undefined || v.hostname !== undefined, { message: 'At least one field is required' });
+
+export const archiveServerBodySchema = z
+  .object({
+    reason: z.string().trim().min(3).max(300),
   })
   .strict();
 

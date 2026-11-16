@@ -27,6 +27,16 @@ export function createServersController(serversService) {
       res.status(201).json({ data: row });
     },
 
+    async update(req, res) {
+      const row = await serversService.update(req.validated.params.id, req.validated.body, req.user);
+      res.status(200).json({ data: row });
+    },
+
+    async archive(req, res) {
+      const row = await serversService.archive(req.validated.params.id, req.validated.body, req.user);
+      res.status(200).json({ data: row });
+    },
+
     async issueEnrollment(req, res) {
       const result = await serversService.issueEnrollment(req.validated.params.id, req.user);
       res.status(201).json({ data: result });

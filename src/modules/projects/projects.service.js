@@ -295,7 +295,10 @@ export function createProjectsService({
       requireOwner(actor, 'configure projects');
       const project = await loadProject(id);
       if (project.archivedAt) throw new AppError(409, 'PROJECT_ARCHIVED', 'Project is archived');
-      if (input.type) await prisma.project.update({ where: { id }, data: { type: input.type } });
+      const projectPatch = {};
+      if (input.name !== undefined) projectPatch.name = input.name;
+      if (input.type !== undefined) projectPatch.type = input.type;
+      if (Object.keys(projectPatch).length) await prisma.project.update({ where: { id }, data: projectPatch });
       const meta = input.secretRefs ? { configuredEnvKeys: [...new Set(input.secretRefs)] } : {};
       if (input.runtime || input.secretRefs) await writeRuntime(id, input.runtime, meta);
       if (input.repository) await writeRepository(id, input.repository);
