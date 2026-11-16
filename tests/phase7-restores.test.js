@@ -1,12 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RESTORE_TRANSITIONS, createRestoresService } from '../src/modules/restores/restores.service.js';
 import { createBackupsService } from '../src/modules/backups/backups.service.js';
-import { sha256 } from '../src/modules/platform/platform.crypto.js';
+import { encrypt, sha256 } from '../src/modules/platform/platform.crypto.js';
 import { APPROVER, DEV, ENV_PROD, ENV_STAGING, KEY, OWNER, PROJECT, U, approve, backupPrisma, makeCtx } from './phase6-helpers.js';
 
 const NOW = new Date('2026-06-01T12:00:00Z');
+const SERVER = U(40);
+const LIVE_DB = {
+  id: U(42),
+  projectId: PROJECT,
+  environmentId: ENV_PROD,
+  dbName: 'app_prod',
+  instance: {
+    id: U(41),
+    serverId: SERVER,
+    engine: 'mysql',
+    name: 'mysql-main',
+    adminUsername: 'root',
+    adminSecretEnc: encrypt('secret-db-pass', KEY),
+  },
+};
 
-async function setup(grants = []) {
+async function setup(grants = [], opts = {}) {
   const ctx = makeCtx({ now: () => NOW, grants });
   const extra = backupPrisma();
   const restoreStore = new Map();
@@ -16,13 +31,32 @@ async function setup(grants = []) {
     findUnique: vi.fn(async ({ where }) => restoreStore.get(where.id) ?? null),
     update: vi.fn(async ({ where, data }) => { Object.assign(restoreStore.get(where.id), data); return restoreStore.get(where.id); }),
   };
-  Object.assign(ctx.prisma, extra);
-  const backups = createBackupsService({ ...ctx, encryptionKey: () => KEY });
-  const restores = createRestoresService({ ...ctx, backups });
+  Object.assign(ctx.prisma, extra, {
+    managedDatabase: {
+      findMany: vi.fn(async () => (opts.liveDb === false ? [] : opts.liveDb ? [LIVE_DB] : [])),
+    },
+  });
+  const dbRestore = vi.fn(async () => ({ restored: true, engine: 'mysql', db: 'app_prod', size: 32 }));
+  const dbBrowse = vi.fn(async () => ({ engine: 'mysql', schemas: ['app_prod'] }));
+  const serverAccessService = opts.serverAccess ?? (opts.liveDb ? { dbRestore, dbBrowse } : null);
+  const backups = createBackupsService({
+    ...ctx,
+    encryptionKey: () => KEY,
+    credentialKey: () => KEY,
+    serverAccessService: opts.liveDb
+      ? { dbDump: vi.fn(async () => ({ bytes: Buffer.from('-- safety\n'), size: 10 })) }
+      : null,
+  });
+  const restores = createRestoresService({
+    ...ctx,
+    backups,
+    credentialKey: () => KEY,
+    serverAccessService,
+  });
   const made = await backups.runBackup(extra.backupPolicy.findUnique ? U(90) : null, { environmentId: ENV_PROD, kinds: ['db', 'config'], trigger: 'manual' }, OWNER);
   const dbArtifact = [...extra.artStore.values()].find((a) => a.kind === 'db');
   const manifest = [...extra.artStore.values()].find((a) => a.kind === 'manifest');
-  return { ...ctx, extra, backups, restores, made, dbArtifact, manifest, restoreStore };
+  return { ...ctx, extra, backups, restores, made, dbArtifact, manifest, restoreStore, dbRestore, dbBrowse, serverAccessService };
 }
 const req = (t, over = {}) => ({ artifactId: t.dbArtifact.id, mode: 'isolated', targetEnvironmentId: ENV_PROD, reason: 'recovery drill', rollbackNote: 'discard trial area', ...over });
 
@@ -126,6 +160,42 @@ describe('restores: rejections', () => {
     t.extra.backupRun.findMany = vi.fn(async () => [{ id: 'r', finishedAt: NOW, policy: { environmentId: ENV_PROD }, artifacts: [...t.extra.artStore.values()] }]);
     const pts = await t.restores.listRestorePoints({ projectId: PROJECT, limit: 5 });
     expect(pts[0].artifacts.map((a) => a.kind)).not.toContain('manifest');
+  });
+});
+
+describe('restores: live SSH in-place', () => {
+  it('Owner in-place db restore uses SSH when managed login exists', async () => {
+    const t = await setup([], { liveDb: true });
+    const r = await t.restores.request(req(t, { mode: 'inplace' }), OWNER);
+    await approve(t, r.approval.id);
+    const done = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER);
+    expect(done.live).toBe(true);
+    expect(done.simulated).toBe(false);
+    expect(t.dbRestore).toHaveBeenCalled();
+    expect(t.dbBrowse).toHaveBeenCalled();
+    // Primary restore should not use the simulated adapter when live succeeds.
+    expect(t.adapters.calls.filter((c) => c.name === 'backup.restore')).toHaveLength(0);
+  });
+
+  it('isolated restore never calls live SSH even when login exists', async () => {
+    const t = await setup([], { liveDb: true });
+    const r = await t.restores.request(req(t, { mode: 'isolated' }), OWNER);
+    await approve(t, r.approval.id);
+    const done = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER);
+    expect(done.live).toBe(false);
+    expect(t.dbRestore).not.toHaveBeenCalled();
+    expect(t.adapters.calls.some((c) => c.name === 'backup.restore')).toBe(true);
+  });
+
+  it('live health failure rolls back via SSH restore of the safety dump', async () => {
+    const t = await setup([], { liveDb: true });
+    const r = await t.restores.request(req(t, { mode: 'inplace' }), OWNER);
+    await approve(t, r.approval.id);
+    t.dbBrowse.mockRejectedValueOnce(new Error('down')).mockResolvedValue({ schemas: ['app_prod'] });
+    const err = await t.restores.execute(r.restoreId, { environmentId: ENV_PROD }, OWNER).catch((e) => e);
+    expect(err).toMatchObject({ code: 'RESTORE_HEALTH_FAILED', rolledBack: true });
+    // First call: failed restore target; second: safety rollback.
+    expect(t.dbRestore).toHaveBeenCalledTimes(2);
   });
 });
 

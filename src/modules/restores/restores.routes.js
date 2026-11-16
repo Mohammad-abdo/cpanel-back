@@ -11,7 +11,11 @@ import { serverAccessService } from '../server-access/server-access.routes.js';
 
 const deps = getDeps();
 const c = createRestoresController(
-  createRestoresService({ ...deps, backups: createBackupsService({ ...deps, serverAccessService }) }),
+  createRestoresService({
+    ...deps,
+    serverAccessService,
+    backups: createBackupsService({ ...deps, serverAccessService }),
+  }),
 );
 const write = requireSession({ requireMfa: true });
 
