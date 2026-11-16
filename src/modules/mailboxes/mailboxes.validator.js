@@ -19,9 +19,13 @@ export const mailboxIdParamsSchema = z.object({ id: z.string().uuid() }).strict(
 
 export const listMailboxesQuerySchema = z
   .object({
-    domainId: z.string().uuid(),
+    /** Optional: omit to list across every visible domain (admin Mail dashboard). */
+    domainId: z.string().uuid().optional(),
+    serverId: z.string().uuid().optional(),
+    q: z.string().trim().min(1).max(100).optional(),
     status: z.enum(['active', 'suspended', 'deleted']).optional(),
     limit: z.coerce.number().int().min(1).max(500).default(100),
+    offset: z.coerce.number().int().min(0).max(100000).default(0),
   })
   .strict();
 

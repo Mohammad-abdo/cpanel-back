@@ -1,4 +1,4 @@
-import { getMessage, listFolders, listMessages, sendMessage } from '../../common/webmail-imap.js';
+import { actionMessages, getMessage, listFolders, listMessages, sendMessage } from '../../common/webmail-imap.js';
 import { webmailAuthService } from '../webmail-auth/webmail-auth.wiring.js';
 
 export function createWebmailMailService() {
@@ -14,6 +14,9 @@ export function createWebmailMailService() {
     },
     send(session, body) {
       return webmailAuthService.withMail(session, (ctx) => sendMessage(ctx, body));
+    },
+    action(session, body) {
+      return webmailAuthService.withMail(session, (ctx) => actionMessages(ctx, body));
     },
   };
 }

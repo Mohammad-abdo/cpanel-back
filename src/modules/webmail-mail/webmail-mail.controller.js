@@ -14,5 +14,8 @@ export function createWebmailMailController(mailService) {
     async send(req, res) {
       res.status(200).json({ data: await mailService.send(req.webmail, req.validated.body) });
     },
+    async action(req, res) {
+      res.status(200).json({ data: await mailService.action(req.webmail, req.validated.body) });
+    },
   };
 }

@@ -6,6 +6,7 @@ import { requireWebmailSession, wrap } from './webmail-session.js';
 import { createWebmailMailService } from './webmail-mail.service.js';
 import { createWebmailMailController } from './webmail-mail.controller.js';
 import {
+  actionMessagesBodySchema,
   listMessagesQuerySchema,
   messageParamsSchema,
   messageQuerySchema,
@@ -20,6 +21,12 @@ const sendLimiter = rateLimit({
   keyFn: (req) => `wm:send:${req.webmail?.mailboxId ?? req.ip}`,
   code: 'WEBMAIL_SEND_RATE',
 });
+const actionLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  max: 120,
+  keyFn: (req) => `wm:action:${req.webmail?.mailboxId ?? req.ip}`,
+  code: 'WEBMAIL_ACTION_RATE',
+});
 
 export const webmailMailRouter = Router();
 
@@ -27,3 +34,4 @@ webmailMailRouter.get('/folders', auth, wrap(controller.folders));
 webmailMailRouter.get('/messages', auth, validate(listMessagesQuerySchema, 'query'), wrap(controller.messages));
 webmailMailRouter.get('/messages/:uid', auth, validate(messageParamsSchema, 'params'), validate(messageQuerySchema, 'query'), wrap(controller.message));
 webmailMailRouter.post('/send', auth, sendLimiter, validate(sendMessageBodySchema), wrap(controller.send));
+webmailMailRouter.post('/messages/action', auth, actionLimiter, validate(actionMessagesBodySchema), wrap(controller.action));

@@ -32,6 +32,7 @@ import { notificationsRouter } from './modules/notifications/notifications.route
 import { mailServerRouter } from './modules/mail-server/mail-server.routes.js';
 import { mailDomainRouter } from './modules/mail-domain/mail-domain.routes.js';
 import { mailboxesRouter } from './modules/mailboxes/mailboxes.routes.js';
+import { mailOverviewRouter } from './modules/mail-overview/mail-overview.routes.js';
 
 export const apiRouter = Router();
 
@@ -58,6 +59,7 @@ apiRouter.use('/backups', backupsRouter);
 apiRouter.use('/domains', domainsRouter);
 apiRouter.use('/domains', mailDomainRouter);
 apiRouter.use('/mailboxes', mailboxesRouter);
+apiRouter.use('/mail', mailOverviewRouter);
 apiRouter.use('/logs', logsRouter);
 apiRouter.use('/security', securityRouter);
 apiRouter.use('/reports', reportsRouter);

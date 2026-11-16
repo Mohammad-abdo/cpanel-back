@@ -72,21 +72,58 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
     return ctx;
   }
 
+  /** Cross-domain list (scope-aware): filters by server/domain/status/search, paginated. Metadata only, never hashes. */
+  async function listAcross({ domainId, serverId, q, status, limit, offset }, actor) {
+    if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+    const domainWhere = await access.scope.domainWhere(actor);
+    let domains = await prisma.domain.findMany({ where: { archivedAt: null, ...domainWhere } });
+    if (domainId) domains = domains.filter((d) => d.id === domainId);
+    if (serverId) domains = domains.filter((d) => d.serverId === serverId);
+    const byId = new Map(domains.map((d) => [d.id, d]));
+    let servers = [];
+    try {
+      servers = (await prisma.server?.findMany?.({ where: {} })) ?? [];
+    } catch {
+      /* alias is cosmetic */
+    }
+    const needle = q ? q.toLowerCase() : null;
+    let all;
+    try {
+      all = await mailDelegate(prisma, 'mailboxAccount').findMany({
+        where: { domainId: { in: [...byId.keys()] }, ...(status ? { status } : { status: { not: 'deleted' } }) },
+        orderBy: { localPart: 'asc' },
+      });
+    } catch (e) {
+      if (e?.code === 'SCHEMA_REQUIRED') return { items: [], total: 0, limit, offset, schemaPending: true };
+      return guardSchema(() => Promise.reject(e));
+    }
+    const dtos = all
+      .map((r) => {
+        const d = byId.get(r.domainId);
+        return { ...toMailboxDto(r, d.name), domainName: d.name, serverId: d.serverId ?? null, serverAlias: servers.find((s) => s.id === d.serverId)?.alias ?? null };
+      })
+      .filter((m) => !needle || m.address.toLowerCase().includes(needle) || (m.displayName ?? '').toLowerCase().includes(needle));
+    return { items: dtos.slice(offset, offset + limit), total: dtos.length, limit, offset };
+  }
+
   return {
-    async list({ domainId, status, limit }, actor) {
-      const domain = await access.loadDomain(domainId, actor);
-      let rows;
-      try {
-        rows = await mailDelegate(prisma, 'mailboxAccount').findMany({
-          where: { domainId, ...(status ? { status } : { status: { not: 'deleted' } }) },
-          orderBy: { localPart: 'asc' },
-          take: limit,
-        });
-      } catch (e) {
-        if (e?.code === 'SCHEMA_REQUIRED') return { items: [], schemaPending: true };
-        return guardSchema(() => Promise.reject(e));
+    async list({ domainId, serverId, q, status, limit, offset = 0 }, actor) {
+      if (domainId && !serverId && !q && !offset) {
+        const domain = await access.loadDomain(domainId, actor);
+        let rows;
+        try {
+          rows = await mailDelegate(prisma, 'mailboxAccount').findMany({
+            where: { domainId, ...(status ? { status } : { status: { not: 'deleted' } }) },
+            orderBy: { localPart: 'asc' },
+            take: limit,
+          });
+        } catch (e) {
+          if (e?.code === 'SCHEMA_REQUIRED') return { items: [], schemaPending: true };
+          return guardSchema(() => Promise.reject(e));
+        }
+        return { items: rows.map((r) => toMailboxDto(r, domain.name)) };
       }
-      return { items: rows.map((r) => toMailboxDto(r, domain.name)) };
+      return listAcross({ domainId, serverId, q, status, limit, offset }, actor);
     },
 
     async get(id, actor) {
