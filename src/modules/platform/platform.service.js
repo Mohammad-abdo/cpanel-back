@@ -89,14 +89,22 @@ export function createPlatformService({ prisma, now = () => new Date(), auditSer
       if (now().getTime() - new Date(row.createdAt).getTime() > APPROVAL_TTL_MS) {
         throw new AppError(409, 'APPROVAL_EXPIRED', 'Approval request has expired');
       }
-      if (!allowSelfApproval && row.requesterId === actor.id) {
+      // Non-Owner requesters cannot self-approve (two-person rule). Owner may self-approve as ultimate control / solo lab.
+      if (!allowSelfApproval && row.requesterId === actor.id && !actor.isOwner) {
         throw new AppError(403, 'SELF_APPROVAL_DENIED', 'Requester cannot approve their own request');
       }
       const updated = await prisma.approvalRequest.update({
         where: { id },
         data: { status: decision === 'approve' ? 'approved' : 'rejected', approverId: actor.id, decidedAt: now() },
       });
-      await audit({ actorId: actor.id, action: `approval.${decision}`, resourceType: row.resourceType, resourceId: row.resourceId, result: 'success', metadata: { approvalId: id, note: note ?? null } });
+      await audit({
+        actorId: actor.id,
+        action: `approval.${decision}`,
+        resourceType: row.resourceType,
+        resourceId: row.resourceId,
+        result: 'success',
+        metadata: { approvalId: id, note: note ?? null, selfApproval: row.requesterId === actor.id },
+      });
       return updated;
     },
 
