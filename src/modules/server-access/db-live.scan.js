@@ -233,6 +233,74 @@ export function isMutatingSql(sql) {
   return /^(INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|RENAME|CALL|LOAD|IMPORT|COPY)\b/.test(head);
 }
 
+const MYSQL_GRANT_ALLOW = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE']);
+
+/** Escape a MySQL string literal (password / host). Never use for identifiers. */
+export function mysqlStringLiteral(value) {
+  return `'${String(value).replace(/[\0\b\t\x1a\\']/g, (c) => {
+    if (c === '\0') return '\\0';
+    if (c === '\b') return '\\b';
+    if (c === '\t') return '\\t';
+    if (c === '\x1a') return '\\Z';
+    if (c === '\\') return '\\\\';
+    return "\\'";
+  })}'`;
+}
+
+/** TASK-022: CREATE DATABASE with safe identifier quoting. */
+export function createDatabaseSql(dbName) {
+  assertSafeDbName(dbName);
+  return `CREATE DATABASE IF NOT EXISTS ${mysqlIdent(dbName)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`;
+}
+
+/** TASK-022: scoped user + GRANT without GRANT OPTION. Password is embedded as a literal for one remote run. */
+export function createScopedUserSql({ username, password, host = '127.0.0.1', dbName, grants }) {
+  assertSafeDbName(dbName);
+  assertSafeDbUser(username);
+  if (typeof host !== 'string' || !/^[A-Za-z0-9._%-]{1,64}$/.test(host)) {
+    throw Object.assign(new Error('Invalid database host'), { code: 'DB_HOST_INVALID' });
+  }
+  const list = Array.isArray(grants) ? grants : [];
+  if (!list.length || list.some((g) => !MYSQL_GRANT_ALLOW.has(g))) {
+    throw Object.assign(new Error('Invalid privilege set'), { code: 'DB_GRANT_INVALID' });
+  }
+  const userSpec = `${mysqlIdent(username)}@${mysqlStringLiteral(host)}`;
+  return [
+    `CREATE USER IF NOT EXISTS ${userSpec} IDENTIFIED BY ${mysqlStringLiteral(password)}`,
+    `GRANT ${list.join(', ')} ON ${mysqlIdent(dbName)}.* TO ${userSpec}`,
+    'FLUSH PRIVILEGES',
+  ].join('; ');
+}
+
+export function dropDatabaseSql(dbName) {
+  assertSafeDbName(dbName);
+  return `DROP DATABASE IF EXISTS ${mysqlIdent(dbName)}`;
+}
+
+/**
+ * Run DDL/admin SQL over mysql CLI. Succeeds on exit code 0 even when stdout is empty
+ * (unlike browse queries which require a result set).
+ */
+export function mysqlAdminCmd(sql, auth) {
+  if (!auth?.username) {
+    throw Object.assign(new Error('MySQL admin login required'), { code: 'DB_LOGIN_REQUIRED' });
+  }
+  const q = shQuote(sql);
+  const user = assertSafeDbUser(auth.username);
+  const pass = String(auth.password ?? '');
+  return [
+    'ERRFILE=$(mktemp)',
+    'CFG=$(mktemp)',
+    'chmod 600 "$CFG"',
+    `printf '%s\\n' '[client]' 'user=${user}' >"$CFG"`,
+    `printf 'password=%s\\n' ${shQuote(pass)} >>"$CFG"`,
+    `mysql --defaults-extra-file="$CFG" --batch --raw --default-character-set=utf8mb4 -e ${q} 2>"$ERRFILE"; EC=$?`,
+    'if [ "$EC" -ne 0 ]; then printf "__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+    'rm -f "$ERRFILE" "$CFG"',
+    'test "$EC" -eq 0',
+  ].join('; ');
+}
+
 function writeMysqlCnf(auth) {
   const user = assertSafeDbUser(auth.username);
   const pass = String(auth.password ?? '');

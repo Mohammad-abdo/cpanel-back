@@ -13,11 +13,15 @@ import {
   assertSafeIdent,
   buildDumpCommand,
   buildRestoreCommand,
+  createDatabaseSql,
+  createScopedUserSql,
   describeTableSql,
+  dropDatabaseSql,
   filterSchemaNames,
   isMutatingSql,
   listSchemasSql,
   listTablesSql,
+  mysqlAdminCmd,
   mysqlCmd,
   parseMysqlBatch,
   parsePsqlAligned,
@@ -928,6 +932,67 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           throw new AppError(502, 'DB_LIVE_FAILED', err?.message || 'Database browse failed');
         } finally {
           client.end();
+        }
+      });
+    },
+
+    /**
+     * TASK-022: live MySQL CREATE/DROP DATABASE and scoped CREATE USER over SSH.
+     * Owner MFA only. Password never appears in argv flags or audit metadata.
+     */
+    async dbManage(serverId, { engine, auth, op, dbName, username, password, host = '127.0.0.1', grants }, actor) {
+      requireOwner(actor);
+      if (engine !== 'mysql') throw new AppError(422, 'ENGINE_UNSUPPORTED', 'Live database management supports MySQL only');
+      if (!auth?.username) throw new AppError(409, 'DB_LOGIN_REQUIRED', 'Save a MySQL username/password on this instance first');
+      let sql;
+      try {
+        if (op === 'createDatabase') sql = createDatabaseSql(dbName);
+        else if (op === 'dropDatabase') sql = dropDatabaseSql(dbName);
+        else if (op === 'createUser') sql = createScopedUserSql({ username, password, host, dbName, grants });
+        else throw new AppError(422, 'DB_OP_INVALID', 'Unknown database management operation');
+      } catch (err) {
+        if (err instanceof AppError) throw err;
+        throw new AppError(422, err.code || 'DB_IDENT_INVALID', err.message || 'Invalid database identifier');
+      }
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const cmd = mysqlAdminCmd(sql, { username: auth.username, password: auth.password ?? '' });
+          const res = await execCommand(client, cmd, { maxBytes: 16 * 1024, timeoutMs: 60_000 });
+          if (res.timedOut) throw new AppError(504, 'DB_MANAGE_TIMEOUT', 'Database management command timed out');
+          if (res.code !== 0) {
+            const hint = String(res.stderr || '')
+              .replace(/__NT_ERR__/g, '')
+              .trim()
+              .slice(0, 280);
+            throw new AppError(502, 'DB_MANAGE_FAILED', hint ? `MySQL failed: ${hint}` : 'MySQL management command failed');
+          }
+          await audit({
+            actorId: actor.id,
+            action: `server.db.${op}`,
+            resourceId: serverId,
+            result: 'success',
+            after: {
+              engine,
+              op,
+              dbName: dbName || null,
+              username: username || null,
+              host: op === 'createUser' ? host : null,
+              grants: op === 'createUser' ? grants : undefined,
+              sqlPreview: scrubSqlPreview(sql),
+            },
+          });
+          return { ok: true, simulated: false, op };
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          throw new AppError(502, 'DB_MANAGE_FAILED', err?.message || 'Database management failed');
+        } finally {
+          try {
+            client.end();
+          } catch {
+            /* ignore */
+          }
         }
       });
     },

@@ -66,6 +66,46 @@ export function createDatabasesService({
     };
   }
 
+  /**
+   * Prefer live MySQL over SSH when the instance is linked to a server and has a saved login.
+   * Owner MFA is required for the SSH path (same gate as dump/restore). Otherwise simulated adapter.
+   */
+  async function runDbAdmin(instance, op, args, actor) {
+    const auth = instanceAuth(instance);
+    if (instance.serverId && auth) {
+      if (!actor?.isOwner) {
+        throw new AppError(
+          403,
+          'LIVE_DB_OWNER_REQUIRED',
+          'Provisioning a real MySQL database on the server requires the Owner (SSH admin path)',
+        );
+      }
+      if (!serverAccessService?.dbManage) {
+        throw new AppError(501, 'DB_MANAGE_UNAVAILABLE', 'Live database management is not available');
+      }
+      return serverAccessService.dbManage(
+        instance.serverId,
+        { engine: instance.engine, auth, op, ...args },
+        actor,
+      );
+    }
+    if (!adapters?.dbAdmin) throw new AppError(501, 'DB_ADMIN_UNAVAILABLE', 'Database admin adapter is not configured');
+    if (op === 'createDatabase') await adapters.dbAdmin.createDatabase({ instance: instance.name, dbName: args.dbName });
+    else if (op === 'createUser') {
+      await adapters.dbAdmin.createUser({
+        instance: instance.name,
+        username: args.username,
+        password: args.password,
+        host: args.host || '127.0.0.1',
+        scope: `${args.dbName}.*`,
+        grants: args.grants,
+        grantOption: false,
+      });
+    } else if (op === 'dropDatabase') await adapters.dbAdmin.dropDatabase({ instance: instance.name, dbName: args.dbName });
+    else throw new AppError(422, 'DB_OP_INVALID', 'Unknown database management operation');
+    return { ok: true, simulated: true, op };
+  }
+
   return {
     async listInstances(actor) {
       const serverId = await scope.serverClause(actor);
@@ -231,10 +271,18 @@ export function createDatabasesService({
         actor,
       );
       if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
-      await adapters.dbAdmin.createDatabase({ instance: instance.name, dbName: input.dbName });
+      const provision = await runDbAdmin(instance, 'createDatabase', { dbName: input.dbName }, actor);
       const row = await prisma.managedDatabase.create({ data: { projectId: input.projectId, environmentId: input.environmentId, instanceId: input.instanceId, dbName: input.dbName } });
-      await audit({ actorId: actor.id, action: 'db.create', resourceType: 'database', resourceId: row.id, environmentId: input.environmentId, result: 'success', after: { dbName: input.dbName } });
-      return row;
+      await audit({
+        actorId: actor.id,
+        action: 'db.create',
+        resourceType: 'database',
+        resourceId: row.id,
+        environmentId: input.environmentId,
+        result: 'success',
+        after: { dbName: input.dbName, simulated: Boolean(provision.simulated) },
+      });
+      return { ...row, simulated: Boolean(provision.simulated) };
     },
 
     /** Scoped access: grants only on this database, only the requested level, never GRANT OPTION or global. */
@@ -253,11 +301,29 @@ export function createDatabasesService({
       );
       if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
       const password = randomBytes(18).toString('base64url');
-      await adapters.dbAdmin.createUser({ instance: db.instance.name, username: input.username, password, host: '127.0.0.1', ...privileges });
+      const provision = await runDbAdmin(
+        db.instance,
+        'createUser',
+        { dbName: db.dbName, username: input.username, password, host: '127.0.0.1', grants: privileges.grants },
+        actor,
+      );
       const row = await prisma.databaseUser.create({ data: { managedDatabaseId: id, username: input.username, privilegesJson: privileges } });
-      await audit({ actorId: actor.id, action: 'db.user.create', resourceType: 'database', resourceId: id, environmentId: db.environmentId, result: 'success', after: { username: input.username, privileges } });
+      await audit({
+        actorId: actor.id,
+        action: 'db.user.create',
+        resourceType: 'database',
+        resourceId: id,
+        environmentId: db.environmentId,
+        result: 'success',
+        after: { username: input.username, privileges, simulated: Boolean(provision.simulated) },
+      });
       // The password is returned exactly once and is never stored or audited.
-      return { user: { id: row.id, username: row.username, privilegesJson: privileges }, password, shownOnce: true };
+      return {
+        user: { id: row.id, username: row.username, privilegesJson: privileges },
+        password,
+        shownOnce: true,
+        simulated: Boolean(provision.simulated),
+      };
     },
 
     async drop(id, input, actor) {
@@ -275,10 +341,18 @@ export function createDatabasesService({
         actor,
       );
       if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
-      await adapters.dbAdmin.dropDatabase({ instance: db.instance.name, dbName: db.dbName });
+      const provision = await runDbAdmin(db.instance, 'dropDatabase', { dbName: db.dbName }, actor);
       await prisma.managedDatabase.delete({ where: { id } });
-      await audit({ actorId: actor.id, action: 'db.drop', resourceType: 'database', resourceId: id, environmentId: db.environmentId, result: 'success', before: { dbName: db.dbName, safetyBackupRunId: run.id } });
-      return { dropped: true, simulated: Boolean(adapters.simulated) };
+      await audit({
+        actorId: actor.id,
+        action: 'db.drop',
+        resourceType: 'database',
+        resourceId: id,
+        environmentId: db.environmentId,
+        result: 'success',
+        before: { dbName: db.dbName, safetyBackupRunId: run.id, simulated: Boolean(provision.simulated) },
+      });
+      return { dropped: true, simulated: Boolean(provision.simulated) };
     },
   };
 }

@@ -465,6 +465,13 @@ export function evaluateHealth(kv) {
   } else {
     checks.push({ id: 'tls', pass: false, warn: false, detail: tls });
   }
+  // F7 / TASK-038: maildir backup is not implemented yet — surface as a warning, never a hard fail.
+  checks.push({
+    id: 'maildir.backup',
+    pass: true,
+    warn: true,
+    detail: 'not configured — maildir backup design REQUIRES DECISION (see runbooks/MAIL-BACKUP-RESTORE.md)',
+  });
   return { ok: checks.every((c) => c.pass), openRelay: kv.open_relay ?? 'unknown', tls, stackVersion: kv.postfix_version || null, checks };
 }
 
@@ -484,6 +491,14 @@ export function normalizeStoredHealth(stored) {
     }
     return c;
   });
+  if (!checks.some((c) => c?.id === 'maildir.backup')) {
+    checks.push({
+      id: 'maildir.backup',
+      pass: true,
+      warn: true,
+      detail: 'not configured — maildir backup design REQUIRES DECISION (see runbooks/MAIL-BACKUP-RESTORE.md)',
+    });
+  }
   return { ...stored, checks, ok: checks.every((c) => c.pass) };
 }
 

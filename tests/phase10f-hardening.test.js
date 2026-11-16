@@ -63,11 +63,13 @@ describe('Phase 10F health probe additions', () => {
     const r = S.evaluateHealth(S.parseKeyValues(base));
     expect(r.ok).toBe(true);
     expect(r.checks.find((c) => c.id === 'service.fail2ban')).toBeUndefined();
+    expect(r.checks.find((c) => c.id === 'maildir.backup')).toMatchObject({ pass: true, warn: true });
   });
   it('evaluates fail2ban, jails, cert expiry and queue', () => {
     const good = S.evaluateHealth(S.parseKeyValues(`${base}svc_fail2ban=active\nf2b_jails=dovecot+postfix+postfix-sasl\ntls_days_left=60\nqueue_size=3\n`));
     expect(good.ok).toBe(true);
     expect(good.checks.find((c) => c.id === 'queue.size')).toMatchObject({ pass: true, queueSize: 3 });
+    expect(good.checks.find((c) => c.id === 'maildir.backup')).toMatchObject({ pass: true, warn: true, detail: expect.stringMatching(/not configured/i) });
     expect(S.evaluateHealth(S.parseKeyValues(`${base}svc_fail2ban=inactive\n`)).ok).toBe(false);
     expect(S.evaluateHealth(S.parseKeyValues(`${base}svc_fail2ban=active\nf2b_jails=dovecot\n`)).checks.find((c) => c.id === 'fail2ban.jails').pass).toBe(false);
     const soon = S.evaluateHealth(S.parseKeyValues(`${base}tls_days_left=5\n`)).checks.find((c) => c.id === 'tls.expiry');
@@ -75,6 +77,11 @@ describe('Phase 10F health probe additions', () => {
     expect(S.evaluateHealth(S.parseKeyValues(`${base}tls_days_left=-2\n`)).ok).toBe(false);
     expect(S.evaluateHealth(S.parseKeyValues(`${base}queue_size=900\n`)).ok).toBe(false);
     expect(S.evaluateHealth(S.parseKeyValues(`${base}queue_size=unknown\n`)).ok).toBe(true);
+  });
+  it('normalizeStoredHealth injects maildir.backup warning when missing', () => {
+    const stored = S.normalizeStoredHealth({ ok: true, tls: 'existing', checks: [{ id: 'open_relay', pass: true, detail: 'closed' }] });
+    expect(stored.checks.find((c) => c.id === 'maildir.backup')).toMatchObject({ pass: true, warn: true });
+    expect(stored.ok).toBe(true);
   });
 });
 
