@@ -23,7 +23,6 @@ export function createWebmailApp() {
   app.use(
     helmet({
       contentSecurityPolicy: {
-        useDefaults: true,
         directives: {
           defaultSrc: ["'self'"],
           scriptSrc: ["'self'"],
