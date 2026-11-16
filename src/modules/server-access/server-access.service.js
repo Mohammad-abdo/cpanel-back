@@ -408,8 +408,8 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       try {
         ({ client } = await connectWith(cred));
         const res = await execScript(client, SITE_LIVE_SCRIPT, {
-          maxBytes: 384 * 1024,
-          timeoutMs: 45_000,
+          maxBytes: 900 * 1024,
+          timeoutMs: 60_000,
           args: [path, name || '', slug || ''],
         });
         if (res.timedOut) throw new AppError(504, 'SITE_LIVE_TIMEOUT', 'Live site inspect timed out');

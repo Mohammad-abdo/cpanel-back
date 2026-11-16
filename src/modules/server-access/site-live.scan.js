@@ -7,24 +7,64 @@ export const SITE_LIVE_SCRIPT = `
 SITE="$1"
 NAME="$2"
 SLUG="$3"
+# Non-interactive SSH often lacks nvm/npm PATH — load common locations.
+export PATH="/usr/local/bin:/usr/bin:$HOME/.local/bin:$PATH"
+if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; fi
+if [ -d "$HOME/.nvm/versions/node" ]; then
+  _nv=$(ls -1d "$HOME/.nvm/versions/node"/v* 2>/dev/null | tail -n 1)
+  [ -n "$_nv" ] && PATH="$_nv/bin:$PATH"
+fi
+for _p in /root/.nvm/versions/node/*/bin /home/*/.nvm/versions/node/*/bin /usr/lib/node_modules/pm2/bin; do
+  [ -x "$_p/pm2" ] && PATH="$_p:$PATH"
+done
+PM2_BIN=$(command -v pm2 2>/dev/null || true)
+pm2_jlist() {
+  [ -n "$PM2_BIN" ] || return 1
+  # Prefer the daemon that actually has apps (often root or a deploy user).
+  for home in "$PM2_HOME" "$HOME/.pm2" /root/.pm2 /home/*/.pm2; do
+    [ -n "$home" ] || continue
+    [ -d "$home" ] || continue
+    out=$(PM2_HOME="$home" "$PM2_BIN" jlist 2>/dev/null | head -c 700000)
+    case "$out" in
+      \\[*) echo "$out"; return 0 ;;
+    esac
+  done
+  if command -v sudo >/dev/null 2>&1; then
+    out=$(sudo -n "$PM2_BIN" jlist 2>/dev/null | head -c 700000)
+    case "$out" in
+      \\[*) echo "$out"; return 0 ;;
+    esac
+  fi
+  PM2_HOME= "$PM2_BIN" jlist 2>/dev/null | head -c 700000
+}
 echo '##meta'
 printf '%s\\n' "$SITE"
 date -u +%Y-%m-%dT%H:%M:%SZ
+printf 'pm2=%s\\n' "\${PM2_BIN:-missing}"
 echo '##pm2'
-if command -v pm2 >/dev/null 2>&1; then pm2 jlist 2>/dev/null | head -c 200000; fi
+pm2_jlist || true
 echo '##pm2logs'
-if command -v pm2 >/dev/null 2>&1; then
+if [ -n "$PM2_BIN" ]; then
   matched=""
-  for n in "$NAME" "$SLUG"; do
+  BASE=$(basename "$SITE")
+  for n in "$NAME" "$SLUG" "$BASE"; do
     [ -n "$n" ] || continue
-    if pm2 describe "$n" >/dev/null 2>&1; then
+    if "$PM2_BIN" describe "$n" >/dev/null 2>&1; then
       matched="$n"
       break
     fi
+    for home in /root/.pm2 "$HOME/.pm2" /home/*/.pm2; do
+      [ -d "$home" ] || continue
+      if PM2_HOME="$home" "$PM2_BIN" describe "$n" >/dev/null 2>&1; then
+        matched="$n"
+        export PM2_HOME="$home"
+        break 2
+      fi
+    done
   done
   if [ -n "$matched" ]; then
     echo "NAME:$matched"
-    pm2 logs "$matched" --nostream --lines 80 2>/dev/null | tail -n 120
+    "$PM2_BIN" logs "$matched" --nostream --lines 80 2>/dev/null | tail -n 120
   fi
 fi
 echo '##applog'
@@ -112,9 +152,39 @@ function matchPm2(list, { path, name, slug }) {
 export function parseSiteLive(text, { path, name, slug } = {}) {
   const sec = sections(text);
   let processes = [];
+  let pm2Total = 0;
+  let pm2Names = [];
+  let pm2RawLen = 0;
+  let pm2RawHead = '';
   try {
-    const raw = (sec.pm2 ?? []).join('').trim();
-    if (raw.startsWith('[')) processes = matchPm2(JSON.parse(raw), { path, name, slug });
+    let raw = (sec.pm2 ?? []).join('\n').trim();
+    pm2RawLen = raw.length;
+    pm2RawHead = raw.slice(0, 120);
+    if (raw.startsWith('[')) {
+      let list;
+      try {
+        list = JSON.parse(raw);
+      } catch {
+        // Truncated jlist — keep complete objects only.
+        const cut = raw.lastIndexOf('},');
+        if (cut > 0) {
+          list = JSON.parse(`${raw.slice(0, cut + 1)}]`);
+        } else {
+          throw new Error('pm2-json');
+        }
+      }
+      pm2Total = Array.isArray(list) ? list.length : 0;
+      pm2Names = (Array.isArray(list) ? list : [])
+        .slice(0, 40)
+        .map((p) => p?.name || p?.pm2_env?.name || '')
+        .filter(Boolean);
+      processes = matchPm2(list, { path, name, slug });
+      // If path/name did not match but PM2 is present, surface online apps whose cwd shares the site folder name.
+      if (!processes.length && path) {
+        const base = path.replace(/\/+$/, '').split('/').pop();
+        processes = matchPm2(list, { path: '', name: base, slug: base });
+      }
+    }
   } catch {
     processes = [];
   }
@@ -130,11 +200,17 @@ export function parseSiteLive(text, { path, name, slug } = {}) {
   }
 
   const git = (sec.git ?? []).map((l) => l.trim()).filter(Boolean);
+  const pm2BinLine = (sec.meta ?? []).map((l) => l.trim()).find((l) => l.startsWith('pm2='));
   return {
     path: sec.meta?.[0]?.trim() || path || null,
     collectedAt: sec.meta?.[1]?.trim() || new Date().toISOString(),
+    pm2Bin: pm2BinLine ? pm2BinLine.slice(4) : null,
     processes,
     running: processes.some((p) => p.status === 'online'),
+    pm2Total,
+    pm2Names,
+    pm2RawLen,
+    pm2RawHead,
     logs: {
       source: logSource,
       lines: logLines.slice(-120),
