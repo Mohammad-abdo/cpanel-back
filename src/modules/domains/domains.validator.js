@@ -6,7 +6,8 @@ const hostname = z.string().trim().toLowerCase().regex(HOSTNAME, 'Invalid hostna
 export const listDomainsQuerySchema = z
   .object({
     projectId: z.string().uuid().optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(20),
+    serverId: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(500).default(50),
   })
   .strict();
 

@@ -4,8 +4,8 @@
  */
 
 /**
- * Kept deliberately simple for /bin/sh compatibility (no bash-only arrays).
- * Each find is wrapped in timeout so a deep tree cannot hang the whole scan.
+ * Site-oriented scan: shallow finds under web roots, pruning dependency trees.
+ * Kept /bin/sh-compatible; each find is time-boxed.
  */
 export const INVENTORY_SCRIPT = [
   "echo '##meta'",
@@ -13,10 +13,11 @@ export const INVENTORY_SCRIPT = [
   'hostname',
   'uname -s',
   "echo '##roots'",
-  'ls -1d /var/www /var/www/* /home/*/public_html /home/*/www /home/*/domains/*/public_html /opt/apps/* /srv/www/* 2>/dev/null | head -n 200',
+  'ls -1d /var/www/* /home/*/public_html /home/*/www /home/*/domains/*/public_html /opt/apps/* /srv/www/* 2>/dev/null | head -n 400',
   "echo '##projects'",
-  'timeout 15 find /var/www /opt/apps /srv/www -maxdepth 4 \\( -name package.json -o -name artisan -o -name wp-config.php -o -name manage.py -o -name go.mod -o -name composer.json -o -name Gemfile -o -name pom.xml \\) -type f 2>/dev/null | head -n 200',
-  'timeout 15 find /home -maxdepth 5 \\( -path "*/public_html/*" -o -path "*/www/*" -o -path "*/domains/*/public_html/*" \\) \\( -name package.json -o -name artisan -o -name wp-config.php -o -name composer.json \\) -type f 2>/dev/null | head -n 200',
+  // Prune dependency/cache dirs so we do not import every npm package as a "project".
+  'timeout 20 find /var/www /opt/apps /srv/www -mindepth 1 -maxdepth 3 \\( -name node_modules -o -name vendor -o -name .git -o -name bower_components -o -name __pycache__ -o -name .cache -o -name .npm -o -name dist -o -name build -o -name .next -o -name coverage \\) -prune -o -type f \\( -name package.json -o -name artisan -o -name wp-config.php -o -name manage.py -o -name go.mod -o -name composer.json -o -name Gemfile -o -name pom.xml \\) -print 2>/dev/null | head -n 400',
+  'timeout 15 find /home -mindepth 2 -maxdepth 6 \\( -name node_modules -o -name vendor -o -name .git \\) -prune -o \\( -path "*/public_html/*" -o -path "*/www/*" -o -path "*/domains/*/public_html/*" \\) -type f \\( -name package.json -o -name artisan -o -name wp-config.php -o -name composer.json \\) -print 2>/dev/null | head -n 200',
   "echo '##pm2'",
   'command -v pm2 >/dev/null 2>&1 && pm2 jlist 2>/dev/null | head -c 80000 || true',
   "echo '##vhosts_nginx'",
@@ -46,6 +47,39 @@ const SYSTEM_DBS = new Set([
   'template0',
   'template1',
 ]);
+
+/** Paths that are libraries/services, not deployable sites. */
+export const JUNK_PATH_RE =
+  /\/(node_modules|vendor|\.git|bower_components|__pycache__|\.cache|\.npm|coverage|\.turbo|\.yarn)(\/|$)/i;
+
+const SKIP_ROOT_NAMES = new Set([
+  'backup',
+  'backups',
+  'html',
+  'cgi-bin',
+  'default',
+  'lost+found',
+  'tmp',
+  'temp',
+  'cache',
+  'logs',
+  'log',
+  'node_modules',
+  'vendor',
+]);
+
+export function isJunkProjectPath(p) {
+  const path = String(p ?? '');
+  if (!path.startsWith('/')) return true;
+  if (JUNK_PATH_RE.test(path)) return true;
+  // Too deep under /var/www (site / optional app subfolder only)
+  const www = path.match(/^\/var\/www\/([^/]+)(?:\/([^/]+))?$/);
+  if (path.startsWith('/var/www/')) {
+    if (!www) return true;
+    if (SKIP_ROOT_NAMES.has(www[1].toLowerCase())) return true;
+  }
+  return false;
+}
 
 function sections(text) {
   const sec = {};
@@ -92,49 +126,90 @@ function projectNameFromPath(appDir) {
   if (['public_html', 'html', 'www', 'public', 'current', 'release'].includes(last) && parts.length >= 2) {
     return parts[parts.length - 2];
   }
+  // Prefer the site folder under /var/www
+  if (parts[0] === 'var' && parts[1] === 'www' && parts[2]) return parts[2];
   return last;
+}
+
+/** Prefer site root over nested app packages when both exist. */
+function scoreProject(path, marker) {
+  let score = 0;
+  if (/^\/var\/www\/[^/]+$/.test(path)) score += 50;
+  if (/^\/var\/www\/[^/]+\/(backend|frontend|api|app|server|web|client)?$/.test(path)) score += 30;
+  if (marker?.endsWith('artisan') || marker?.endsWith('wp-config.php')) score += 20;
+  if (marker?.endsWith('composer.json') || marker?.endsWith('package.json')) score += 10;
+  if (JUNK_PATH_RE.test(path)) score -= 100;
+  score -= Math.min(path.split('/').length, 12);
+  return score;
 }
 
 /** Parse INVENTORY_SCRIPT stdout into structured candidates. */
 export function parseInventory(text) {
   const sec = sections(text);
-  const projects = [];
-  const seenPaths = new Set();
+  const byPath = new Map();
+
+  const addProject = (raw) => {
+    if (!raw?.path || isJunkProjectPath(raw.path)) return;
+    const name = raw.name || projectNameFromPath(raw.path);
+    const slug = raw.slug || slugify(name);
+    if (!slug || SKIP_ROOT_NAMES.has(slug)) return;
+    const candidate = {
+      name,
+      slug,
+      path: raw.path,
+      marker: raw.marker ?? null,
+      type: raw.type ?? 'custom',
+      runtime: raw.runtime ?? null,
+      processManager: raw.processManager ?? 'none',
+      kind: 'site',
+    };
+    const prev = byPath.get(candidate.path);
+    if (!prev || scoreProject(candidate.path, candidate.marker) > scoreProject(prev.path, prev.marker)) {
+      byPath.set(candidate.path, candidate);
+    }
+  };
 
   for (const line of sec.projects ?? []) {
     const marker = line.trim();
     if (!marker.startsWith('/')) continue;
+    if (isJunkProjectPath(marker)) continue;
     const appDir = marker.replace(/\/[^/]+$/, '');
-    if (seenPaths.has(appDir)) continue;
-    seenPaths.add(appDir);
+    if (isJunkProjectPath(appDir)) continue;
     const name = projectNameFromPath(appDir);
-    const slug = slugify(name);
-    if (!slug) continue;
     const detected = detectType(marker, name);
-    projects.push({
-      name,
-      slug,
-      path: appDir,
-      marker,
-      ...detected,
+    addProject({ name, path: appDir, marker, ...detected });
+  }
+
+  // Site folders under web roots without a marker still count as sites (static/php).
+  for (const line of sec.roots ?? []) {
+    const root = line.trim();
+    if (!root.startsWith('/') || root === '/var/www') continue;
+    if (isJunkProjectPath(root)) continue;
+    const base = root.split('/').pop();
+    if (SKIP_ROOT_NAMES.has(String(base).toLowerCase())) continue;
+    // Only add root as project if nothing better already covers this site
+    const covered = [...byPath.keys()].some((p) => p === root || p.startsWith(`${root}/`));
+    if (covered) continue;
+    addProject({
+      name: projectNameFromPath(root),
+      path: root,
+      marker: null,
+      type: 'php',
+      runtime: 'php',
+      processManager: 'apache',
     });
   }
 
+  // PM2 apps only when cwd is a real site path (not node_modules)
   try {
     const raw = (sec.pm2 ?? []).join('').trim();
     if (raw.startsWith('[')) {
-      const list = JSON.parse(raw);
-      for (const proc of list) {
+      for (const proc of JSON.parse(raw)) {
         const cwd = proc?.pm2_env?.pm_cwd || proc?.pm2_env?.cwd;
         const name = proc?.name || proc?.pm2_env?.name;
-        if (!cwd || !name) continue;
-        if (seenPaths.has(cwd)) continue;
-        seenPaths.add(cwd);
-        const slug = slugify(name);
-        if (!slug) continue;
-        projects.push({
+        if (!cwd || !name || isJunkProjectPath(cwd)) continue;
+        addProject({
           name,
-          slug,
           path: cwd,
           type: 'node',
           runtime: 'node',
@@ -147,16 +222,17 @@ export function parseInventory(text) {
     /* ignore malformed pm2 json */
   }
 
-  for (const line of sec.roots ?? []) {
-    const root = line.trim();
-    if (!root.startsWith('/')) continue;
-    if (!/public_html$|\/www$/.test(root)) continue;
-    if (seenPaths.has(root)) continue;
-    seenPaths.add(root);
-    const name = projectNameFromPath(root);
-    const slug = slugify(name);
-    if (!slug) continue;
-    projects.push({ name, slug, path: root, marker: null, type: 'php', runtime: 'php', processManager: 'apache' });
+  // Collapse nested packages into their site root when possible
+  const projects = [...byPath.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const collapsed = [];
+  for (const p of projects) {
+    const parent = collapsed.find((c) => p.path !== c.path && p.path.startsWith(`${c.path}/`));
+    if (parent) {
+      // Keep nested only if it looks like a first-class app folder
+      const rel = p.path.slice(parent.path.length + 1);
+      if (!/^(backend|frontend|api|app|server|web|client|admin)$/i.test(rel)) continue;
+    }
+    collapsed.push(p);
   }
 
   const domains = [];
@@ -222,6 +298,12 @@ export function parseInventory(text) {
     if (apache) pushDomain(apache[1], null, 'apache');
   }
 
+  // Attach matching domain names to site projects for easier linking in the UI
+  for (const p of collapsed) {
+    const match = domains.find((d) => d.name === p.name || p.path.endsWith(`/${d.name}`) || p.path.includes(`/${d.name}/`));
+    if (match) p.domainName = match.name;
+  }
+
   const mysqlSchemas = (sec.mysql ?? []).map((l) => l.trim()).filter((n) => n && !SYSTEM_DBS.has(n));
   const postgresSchemas = (sec.postgres ?? []).map((l) => l.trim()).filter((n) => n && !SYSTEM_DBS.has(n));
 
@@ -244,14 +326,14 @@ export function parseInventory(text) {
   }
 
   return {
-    projects,
+    projects: collapsed,
     domains,
     databases,
     meta: {
       user: sec.meta?.[0]?.trim() || null,
       hostname: sec.meta?.[1]?.trim() || null,
       os: sec.meta?.[2]?.trim() || null,
-      rootsSampled: (sec.roots ?? []).map((l) => l.trim()).filter(Boolean).slice(0, 50),
+      rootsSampled: (sec.roots ?? []).map((l) => l.trim()).filter(Boolean).slice(0, 80),
     },
     scannedAt: new Date().toISOString(),
   };

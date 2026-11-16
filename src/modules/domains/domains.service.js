@@ -54,13 +54,18 @@ export function createDomainsService({ prisma, now = () => new Date(), auditServ
   }
 
   return {
-    async list({ projectId, limit }, actor) {
+    async list({ projectId, serverId, limit }, actor) {
       const visible = await scope.domainWhere(actor);
       return prisma.domain.findMany({
-        where: { archivedAt: null, ...(projectId ? { projectId } : {}), ...visible },
+        where: {
+          archivedAt: null,
+          ...(projectId ? { projectId } : {}),
+          ...(serverId ? { serverId } : {}),
+          ...visible,
+        },
         take: limit,
         orderBy: { name: 'asc' },
-        include: { certificates: true },
+        include: { certificates: true, server: { select: { id: true, alias: true } } },
       });
     },
 

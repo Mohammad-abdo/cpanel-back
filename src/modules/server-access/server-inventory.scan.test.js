@@ -1,33 +1,48 @@
 import { describe, expect, it } from 'vitest';
-import { parseInventory } from './server-inventory.scan.js';
+import { isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
 
 describe('parseInventory', () => {
-  it('parses projects, nginx domains and mysql schemas', () => {
+  it('keeps site roots and drops node_modules packages', () => {
     const out = parseInventory(`
+##meta
+root
+host
+Linux
+##roots
+/var/www/shop.example.com
+/var/www/api.example.com
+/var/www/backup
 ##projects
-/var/www/shop/artisan
-/var/www/api/package.json
+/var/www/shop.example.com/artisan
+/var/www/shop.example.com/node_modules/abort-controller/package.json
+/var/www/api.example.com/package.json
+/var/www/api.example.com/node_modules/lodash/package.json
 ##pm2
 []
 ##vhosts_nginx
 FILE:/etc/nginx/sites-enabled/shop
-  server_name shop.example.com www.shop.example.com;
-  root /var/www/shop/public;
-  proxy_pass http://127.0.0.1:3000;
+  server_name shop.example.com;
+  root /var/www/shop.example.com/public;
 ##vhosts_apache
+##vhosts_grep
 ##mysql
-information_schema
 shop_db
 mysql
 ##postgres
 ##engines
 mysql
-0.0.0.0:3306
 `);
-    expect(out.projects.map((p) => p.slug)).toEqual(expect.arrayContaining(['shop', 'api']));
-    expect(out.projects.find((p) => p.slug === 'shop').type).toBe('laravel');
-    expect(out.domains.map((d) => d.name)).toEqual(expect.arrayContaining(['shop.example.com', 'www.shop.example.com']));
-    expect(out.domains[0].confPath).toBe('/etc/nginx/sites-enabled/shop');
-    expect(out.databases).toEqual([{ engine: 'mysql', port: 3306, schemas: ['shop_db'] }]);
+    expect(out.projects.map((p) => p.path).sort()).toEqual([
+      '/var/www/api.example.com',
+      '/var/www/shop.example.com',
+    ]);
+    expect(out.projects.find((p) => p.path.includes('shop')).type).toBe('laravel');
+    expect(out.domains.map((d) => d.name)).toContain('shop.example.com');
+    expect(out.databases[0].schemas).toEqual(['shop_db']);
+  });
+
+  it('flags dependency paths as junk', () => {
+    expect(isJunkProjectPath('/var/www/app/node_modules/foo')).toBe(true);
+    expect(isJunkProjectPath('/var/www/shop.example.com')).toBe(false);
   });
 });

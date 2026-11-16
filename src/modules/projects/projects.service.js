@@ -109,7 +109,7 @@ export function createProjectsService({ prisma, now = () => new Date(), auditSer
         take: limit,
         ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
         orderBy: { name: 'asc' },
-        include: { environments: true },
+        include: { environments: true, runtime: true },
       });
     },
 

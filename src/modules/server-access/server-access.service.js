@@ -3,7 +3,7 @@ import path from 'node:path';
 import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { execCommand, execScript, openSftp } from './ssh.connector.js';
-import { INVENTORY_SCRIPT, parseInventory } from './server-inventory.scan.js';
+import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
 
 const posix = path.posix;
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
@@ -449,6 +449,24 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       requireOwner(actor);
       const server = await prisma.server.findUnique({ where: { id: serverId } });
       if (!server || server.archivedAt) throw new AppError(404, 'SERVER_NOT_FOUND', 'Server not found');
+
+      // Archive earlier junk discoveries (e.g. node_modules packages mistaken for sites).
+      const discovered = await prisma.project.findMany({
+        where: { serverId, status: 'discovered', archivedAt: null },
+        include: { runtime: true },
+      });
+      let cleaned = 0;
+      for (const row of discovered) {
+        const path = row.runtime?.metaJson?.discoveredPath;
+        if (path && isJunkProjectPath(path)) {
+          await prisma.project.update({
+            where: { id: row.id },
+            data: { status: 'archived', archivedAt: now() },
+          });
+          cleaned += 1;
+        }
+      }
+
       const inventory = await this.scanInventory(serverId, actor);
       const importAll = Boolean(selection?.importAll);
       const wantProjects = importAll || selection?.projects === undefined ? null : new Set(selection.projects);
@@ -459,6 +477,10 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       const skipped = { projects: [], domains: [], databases: [] };
 
       for (const c of inventory.projects) {
+        if (isJunkProjectPath(c.path)) {
+          skipped.projects.push({ name: c.name, reason: 'junk-path' });
+          continue;
+        }
         if (wantProjects && !wantProjects.has(c.path) && !wantProjects.has(c.slug)) {
           skipped.projects.push({ name: c.name, reason: 'not-selected' });
           continue;
@@ -498,12 +520,22 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           continue;
         }
         const existing = await prisma.domain.findUnique({ where: { name: d.name } });
+        const matchedProject =
+          created.projects.find((p) => p.name === d.name || p.slug === d.name.replace(/\./g, '-')) ||
+          (await prisma.project.findFirst({
+            where: {
+              serverId,
+              archivedAt: null,
+              OR: [{ name: d.name }, { slug: d.name.replace(/\./g, '-') }],
+            },
+          }));
         if (existing) {
           if (existing.serverId === serverId || !existing.serverId) {
             const updated = await prisma.domain.update({
               where: { id: existing.id },
               data: {
                 serverId,
+                projectId: existing.projectId ?? matchedProject?.id ?? null,
                 status: existing.status === 'active' ? existing.status : 'discovered',
                 metaJson: {
                   ...(existing.metaJson && typeof existing.metaJson === 'object' ? existing.metaJson : {}),
@@ -525,6 +557,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           data: {
             name: d.name,
             serverId,
+            projectId: matchedProject?.id ?? null,
             status: 'discovered',
             metaJson: {
               confPath: d.confPath ?? null,
@@ -604,6 +637,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         resourceId: serverId,
         result: 'success',
         after: {
+          cleaned,
           created: {
             projects: created.projects.length,
             domains: created.domains.length,
@@ -615,9 +649,9 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             databases: skipped.databases.length,
           },
         },
-      });
+      }).catch(() => null);
 
-      return { inventory, created, skipped };
+      return { inventory, created, skipped, cleaned };
     },
 
     // ---- terminal ----------------------------------------------------------------------------

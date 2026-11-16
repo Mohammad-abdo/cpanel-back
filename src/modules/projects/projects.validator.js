@@ -11,7 +11,7 @@ const sha = z.string().regex(/^[0-9a-f]{7,40}$/);
 
 export const listProjectsQuerySchema = z
   .object({
-    limit: z.coerce.number().int().min(1).max(100).default(20),
+    limit: z.coerce.number().int().min(1).max(500).default(50),
     cursor: z.string().uuid().optional(),
     serverId: z.string().uuid().optional(),
   })
