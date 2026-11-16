@@ -252,3 +252,14 @@ describe('domain and mailbox push', () => {
     expect(mb).toMatchObject({ provisioned: false, remote: { pushed: false, reason: 'MAIL_REMOTE_FAILED' } });
   });
 });
+
+describe('mailbox scripts match addresses literally (no regex)', () => {
+  it('uses awk exact field match, never grep on the address', async () => {
+    const m = await import('../src/common/mail-provision.scripts.js');
+    for (const s of [m.mailboxSetScript(), m.mailboxRemoveScript(), m.domainAddScript()]) {
+      expect(s).not.toMatch(/grep -v "\^\$addr/);
+      expect(s).not.toMatch(/grep -q "\^/);
+    }
+    expect(m.mailboxRemoveScript()).toContain("awk -F: -v a=\"$addr\" '$1 != a'");
+  });
+});
