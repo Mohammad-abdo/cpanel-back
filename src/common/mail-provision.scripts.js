@@ -160,7 +160,7 @@ const STEP_SCRIPTS = {
     'NTEOF',
     'echo "127.0.0.1" > /etc/opendkim/TrustedHosts',
     'if [ -f /etc/default/opendkim ]; then',
-    '  sed -i -E \'s|^#?\\s*SOCKET=.*|SOCKET="inet:8891@127.0.0.1"|\' /etc/default/opendkim',
+    '  sed -i -E \'s|^#?[[:space:]]*SOCKET=.*|SOCKET="inet:8891@127.0.0.1"|\' /etc/default/opendkim',
     '  grep -q \'^SOCKET=\' /etc/default/opendkim || echo \'SOCKET="inet:8891@127.0.0.1"\' >> /etc/default/opendkim',
     'else',
     '  printf \'SOCKET="inet:8891@127.0.0.1"\\n\' > /etc/default/opendkim',
