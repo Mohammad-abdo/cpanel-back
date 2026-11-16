@@ -2,7 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import path from 'node:path';
 import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
-import { execCommand, openSftp } from './ssh.connector.js';
+import { execCommand, execScript, openSftp } from './ssh.connector.js';
 import { INVENTORY_SCRIPT, parseInventory } from './server-inventory.scan.js';
 
 const posix = path.posix;
@@ -402,8 +402,16 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       const cred = await loadCredential(serverId);
       const { client } = await connectWith(cred);
       try {
-        const res = await execCommand(client, INVENTORY_SCRIPT, { maxBytes: 768 * 1024, timeoutMs: 45_000 });
+        const res = await execScript(client, INVENTORY_SCRIPT, {
+          maxBytes: 768 * 1024,
+          timeoutMs: 60_000,
+        });
         const inventory = parseInventory(res.stdout);
+        inventory.debug = {
+          bytes: res.stdout?.length ?? 0,
+          exitCode: res.code,
+          timedOut: Boolean(res.timedOut),
+        };
         await audit({
           actorId: actor.id,
           action: 'server.inventory.scan',
@@ -413,6 +421,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             projects: inventory.projects.length,
             domains: inventory.domains.length,
             databases: inventory.databases.length,
+            bytes: inventory.debug.bytes,
           },
         });
         return inventory;
@@ -443,13 +452,23 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           skipped.projects.push({ name: c.name, reason: 'not-selected' });
           continue;
         }
-        const existing = await prisma.project.findFirst({ where: { serverId, slug: c.slug } });
-        if (existing) {
-          skipped.projects.push({ name: c.name, slug: c.slug, reason: 'already-known' });
-          continue;
+        let slug = c.slug;
+        const bySlug = await prisma.project.findFirst({ where: { serverId, slug } });
+        if (bySlug) {
+          const runtime = await prisma.projectRuntime.findFirst({ where: { projectId: bySlug.id } });
+          if (runtime?.metaJson?.discoveredPath === c.path) {
+            skipped.projects.push({ name: c.name, slug, reason: 'already-known' });
+            continue;
+          }
+          const suffix = createHash('sha256').update(c.path).digest('hex').slice(0, 6);
+          slug = `${c.slug}-${suffix}`.slice(0, 63);
+          if (await prisma.project.findFirst({ where: { serverId, slug } })) {
+            skipped.projects.push({ name: c.name, slug, reason: 'already-known' });
+            continue;
+          }
         }
         const project = await prisma.project.create({
-          data: { serverId, name: c.name, slug: c.slug, type: c.type, status: 'discovered' },
+          data: { serverId, name: c.name, slug, type: c.type, status: 'discovered' },
         });
         await prisma.projectRuntime.create({
           data: {

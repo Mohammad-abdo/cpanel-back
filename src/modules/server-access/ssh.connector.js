@@ -75,6 +75,32 @@ export function execCommand(client, command, { maxBytes = 64 * 1024, timeoutMs =
   });
 }
 
+/**
+ * Runs a multi-line script on stdin via `bash -s` (avoids bash -c newline/quoting breakage).
+ * Script must be fixed/trusted — never interpolate user input into it.
+ */
+export function execScript(client, script, { maxBytes = 64 * 1024, timeoutMs = 10_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    client.exec('bash -s', (err, stream) => {
+      if (err) return reject(new AppError(502, 'SSH_EXEC_FAILED', 'Could not run the script over SSH'));
+      let out = '';
+      const timer = setTimeout(() => {
+        stream.close();
+        resolve({ code: null, stdout: out, timedOut: true });
+      }, timeoutMs);
+      stream.on('data', (d) => {
+        if (out.length < maxBytes) out += d.toString('utf8');
+      });
+      stream.stderr.on('data', () => {});
+      stream.on('close', (code) => {
+        clearTimeout(timer);
+        resolve({ code, stdout: out.slice(0, maxBytes) });
+      });
+      stream.end(String(script).replace(/\r\n/g, '\n'));
+    });
+  });
+}
+
 export function openSftp(client) {
   return new Promise((resolve, reject) => {
     client.sftp((err, sftp) => (err ? reject(new AppError(502, 'SFTP_UNAVAILABLE', 'SFTP is not available on this server')) : resolve(sftp)));

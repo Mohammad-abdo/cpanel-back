@@ -3,42 +3,39 @@
  * Never modifies the remote host.
  */
 
-/** Marker files that identify an application root (depth-limited find). */
+/**
+ * Kept deliberately simple for /bin/sh compatibility (no bash-only arrays).
+ * Each find is wrapped in timeout so a deep tree cannot hang the whole scan.
+ */
 export const INVENTORY_SCRIPT = [
+  "echo '##meta'",
+  'whoami',
+  'hostname',
+  'uname -s',
+  "echo '##roots'",
+  'ls -1d /var/www /var/www/* /home/*/public_html /home/*/www /home/*/domains/*/public_html /opt/apps/* /srv/www/* 2>/dev/null | head -n 200',
   "echo '##projects'",
-  [
-    'for root in /var/www /var/www/html /home/*/public_html /home/*/www /home/*/domains/*/public_html /opt/apps /srv /srv/www; do',
-    '  [ -d "$root" ] || continue',
-    '  find "$root" -maxdepth 4 \\( -type f \\( -name package.json -o -name artisan -o -name wp-config.php -o -name manage.py -o -name go.mod -o -name composer.json -o -name Gemfile -o -name pom.xml \\) \\) 2>/dev/null',
-    'done | head -n 300',
-  ].join(' '),
+  'timeout 15 find /var/www /opt/apps /srv/www -maxdepth 4 \\( -name package.json -o -name artisan -o -name wp-config.php -o -name manage.py -o -name go.mod -o -name composer.json -o -name Gemfile -o -name pom.xml \\) -type f 2>/dev/null | head -n 200',
+  'timeout 15 find /home -maxdepth 5 \\( -path "*/public_html/*" -o -path "*/www/*" -o -path "*/domains/*/public_html/*" \\) \\( -name package.json -o -name artisan -o -name wp-config.php -o -name composer.json \\) -type f 2>/dev/null | head -n 200',
   "echo '##pm2'",
   'command -v pm2 >/dev/null 2>&1 && pm2 jlist 2>/dev/null | head -c 80000 || true',
   "echo '##vhosts_nginx'",
-  [
-    'for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do',
-    '  [ -f "$f" ] || [ -L "$f" ] || continue',
-    '  echo "FILE:$f"',
-    '  grep -E "server_name|root |proxy_pass|listen " "$f" 2>/dev/null | head -n 40',
-    'done',
-  ].join(' '),
+  'for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do if [ -e "$f" ]; then echo "FILE:$f"; grep -E "server_name|root |proxy_pass" "$f" 2>/dev/null | head -n 40; fi; done',
   "echo '##vhosts_apache'",
-  [
-    'for f in /etc/apache2/sites-enabled/* /etc/httpd/conf.d/*.conf; do',
-    '  [ -f "$f" ] || [ -L "$f" ] || continue',
-    '  echo "FILE:$f"',
-    '  grep -Ei "ServerName|DocumentRoot|ProxyPass |Listen " "$f" 2>/dev/null | head -n 40',
-    'done',
-  ].join(' '),
+  'for f in /etc/apache2/sites-enabled/* /etc/httpd/conf.d/*.conf /etc/apache2/conf.d/*.conf; do if [ -e "$f" ]; then echo "FILE:$f"; grep -Ei "ServerName|ServerAlias|DocumentRoot|ProxyPass" "$f" 2>/dev/null | head -n 60; fi; done',
+  "echo '##vhosts_grep'",
+  'timeout 10 grep -RhoE "ServerName[[:space:]]+[^[:space:]]+" /etc/apache2 /etc/httpd 2>/dev/null | head -n 200 || true',
+  'timeout 10 grep -RhoE "server_name[[:space:]]+[^;]+" /etc/nginx 2>/dev/null | head -n 200 || true',
   "echo '##mysql'",
-  "mysql --batch --skip-column-names -e 'SHOW DATABASES' 2>/dev/null | head -n 200 || mariadb --batch --skip-column-names -e 'SHOW DATABASES' 2>/dev/null | head -n 200 || true",
+  "mysql --batch --skip-column-names -e 'SHOW DATABASES' 2>/dev/null | head -n 200 || mysql --defaults-file=/etc/mysql/debian.cnf --batch --skip-column-names -e 'SHOW DATABASES' 2>/dev/null | head -n 200 || true",
   "echo '##postgres'",
-  "psql -U postgres -tAc \"SELECT datname FROM pg_database WHERE datistemplate = false\" 2>/dev/null | head -n 200 || sudo -n -u postgres psql -tAc \"SELECT datname FROM pg_database WHERE datistemplate = false\" 2>/dev/null | head -n 200 || true",
+  'psql -U postgres -tAc "SELECT datname FROM pg_database WHERE datistemplate = false" 2>/dev/null | head -n 200 || true',
   "echo '##engines'",
-  'command -v mysql >/dev/null 2>&1 && echo mysql || command -v mariadb >/dev/null 2>&1 && echo mysql || true',
+  'command -v mysql >/dev/null 2>&1 && echo mysql || true',
+  'command -v mariadb >/dev/null 2>&1 && echo mysql || true',
   'command -v psql >/dev/null 2>&1 && echo postgres || true',
   "ss -tlnH 2>/dev/null | awk '{print $4}' | grep -E ':(3306|5432)$' | head -n 20 || true",
-].join('; ');
+].join('\n');
 
 const SYSTEM_DBS = new Set([
   'mysql',
@@ -123,7 +120,6 @@ export function parseInventory(text) {
     });
   }
 
-  // PM2 apps that are not under the scanned trees
   try {
     const raw = (sec.pm2 ?? []).join('').trim();
     if (raw.startsWith('[')) {
@@ -149,6 +145,18 @@ export function parseInventory(text) {
     }
   } catch {
     /* ignore malformed pm2 json */
+  }
+
+  for (const line of sec.roots ?? []) {
+    const root = line.trim();
+    if (!root.startsWith('/')) continue;
+    if (!/public_html$|\/www$/.test(root)) continue;
+    if (seenPaths.has(root)) continue;
+    seenPaths.add(root);
+    const name = projectNameFromPath(root);
+    const slug = slugify(name);
+    if (!slug) continue;
+    projects.push({ name, slug, path: root, marker: null, type: 'php', runtime: 'php', processManager: 'apache' });
   }
 
   const domains = [];
@@ -192,6 +200,10 @@ export function parseInventory(text) {
     }
     const sn = /ServerName\s+(\S+)/i.exec(t);
     if (sn) pushDomain(sn[1], apacheFile, 'apache');
+    const sa = /ServerAlias\s+(.+)/i.exec(t);
+    if (sa) {
+      for (const part of sa[1].trim().split(/\s+/)) pushDomain(part, apacheFile, 'apache');
+    }
     const doc = /DocumentRoot\s+(\S+)/i.exec(t);
     if (doc && domains.length) {
       const last = domains[domains.length - 1];
@@ -199,12 +211,19 @@ export function parseInventory(text) {
     }
   }
 
-  const mysqlSchemas = (sec.mysql ?? [])
-    .map((l) => l.trim())
-    .filter((n) => n && !SYSTEM_DBS.has(n));
-  const postgresSchemas = (sec.postgres ?? [])
-    .map((l) => l.trim())
-    .filter((n) => n && !SYSTEM_DBS.has(n));
+  for (const line of sec.vhosts_grep ?? []) {
+    const t = line.trim();
+    const nginx = /server_name\s+(.+)/i.exec(t);
+    if (nginx) {
+      for (const part of nginx[1].replace(/;$/, '').trim().split(/\s+/)) pushDomain(part, null, 'nginx');
+      continue;
+    }
+    const apache = /ServerName\s+(\S+)/i.exec(t);
+    if (apache) pushDomain(apache[1], null, 'apache');
+  }
+
+  const mysqlSchemas = (sec.mysql ?? []).map((l) => l.trim()).filter((n) => n && !SYSTEM_DBS.has(n));
+  const postgresSchemas = (sec.postgres ?? []).map((l) => l.trim()).filter((n) => n && !SYSTEM_DBS.has(n));
 
   const engines = new Set();
   for (const line of sec.engines ?? []) {
@@ -228,6 +247,12 @@ export function parseInventory(text) {
     projects,
     domains,
     databases,
+    meta: {
+      user: sec.meta?.[0]?.trim() || null,
+      hostname: sec.meta?.[1]?.trim() || null,
+      os: sec.meta?.[2]?.trim() || null,
+      rootsSampled: (sec.roots ?? []).map((l) => l.trim()).filter(Boolean).slice(0, 50),
+    },
     scannedAt: new Date().toISOString(),
   };
 }
