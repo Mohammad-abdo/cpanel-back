@@ -66,6 +66,7 @@ export function createDomainsService({ prisma, now = () => new Date(), auditServ
 
     async getById(id, actor) {
       const row = await load(id);
+      if (actor?.isOwner) return row;
       const visible = (await scope.canSeeProject(actor, row.projectId)) || (!row.projectId && (await scope.explicitServerIds(actor))?.includes(row.serverId));
       if (!visible) throw new AppError(404, 'DOMAIN_NOT_FOUND', 'Domain not found');
       return row;
@@ -79,6 +80,41 @@ export function createDomainsService({ prisma, now = () => new Date(), auditServ
       const row = await prisma.domain.create({ data: { name: input.name, projectId: input.projectId, serverId: input.serverId ?? null } });
       await audit({ actorId: actor.id, action: 'domain.create', resourceType: 'domain', resourceId: row.id, environmentId: input.environmentId, result: 'success', after: { name: row.name, projectId: row.projectId } });
       return row;
+    },
+
+    /**
+     * Load the live virtual-host file for a discovered/managed domain (Owner, via SFTP).
+     * `serverAccess.read` must be injected; without it this stays unavailable.
+     */
+    async readConf(id, actor, serverAccess = null) {
+      if (!actor?.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can read domain conf files');
+      const domain = await load(id);
+      const confPath = domain.metaJson?.confPath;
+      if (!confPath) throw new AppError(409, 'DOMAIN_CONF_UNKNOWN', 'No conf path is known for this domain. Run server inventory first.');
+      if (!domain.serverId) throw new AppError(409, 'DOMAIN_NO_SERVER', 'Domain is not linked to a server');
+      if (!serverAccess?.read) throw new AppError(500, 'SFTP_UNAVAILABLE', 'File access is not wired');
+      const file = await serverAccess.read(domain.serverId, confPath, actor);
+      return { domain: domain.name, confPath, webserver: domain.metaJson?.webserver ?? null, ...file };
+    },
+
+    /** Save a conf file over SFTP and keep metaJson in sync. Owner only. */
+    async writeConf(id, { content }, actor, serverAccess = null) {
+      if (!actor?.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can edit domain conf files');
+      const domain = await load(id);
+      const confPath = domain.metaJson?.confPath;
+      if (!confPath) throw new AppError(409, 'DOMAIN_CONF_UNKNOWN', 'No conf path is known for this domain. Run server inventory first.');
+      if (!domain.serverId) throw new AppError(409, 'DOMAIN_NO_SERVER', 'Domain is not linked to a server');
+      if (!serverAccess?.write) throw new AppError(500, 'SFTP_UNAVAILABLE', 'File access is not wired');
+      const saved = await serverAccess.write(domain.serverId, { path: confPath, content }, actor);
+      await audit({
+        actorId: actor.id,
+        action: 'domain.conf.write',
+        resourceType: 'domain',
+        resourceId: id,
+        result: 'success',
+        after: { confPath, bytes: content?.length ?? 0 },
+      });
+      return { domain: domain.name, confPath, ...saved };
     },
 
     /** Read-only preview: rendered config, validation result and impact. Nothing is applied. */

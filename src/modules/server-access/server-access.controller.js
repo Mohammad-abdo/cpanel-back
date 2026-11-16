@@ -54,5 +54,11 @@ export function createServerAccessController(svc) {
     async ticket(req, res) {
       res.status(201).json({ data: await svc.createTicket(id(req), req.user) });
     },
+    async scanInventory(req, res) {
+      res.status(200).json({ data: await svc.scanInventory(id(req), req.user) });
+    },
+    async importInventory(req, res) {
+      res.status(200).json({ data: await svc.importInventory(id(req), req.validated.body ?? {}, req.user) });
+    },
   };
 }

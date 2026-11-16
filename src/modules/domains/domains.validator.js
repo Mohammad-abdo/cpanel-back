@@ -48,3 +48,9 @@ export const dnsChangeBodySchema = z
     ...approvalFields,
   })
   .strict();
+
+export const domainConfBodySchema = z
+  .object({
+    content: z.string().max(1024 * 1024),
+  })
+  .strict();

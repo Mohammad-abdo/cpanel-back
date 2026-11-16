@@ -517,6 +517,8 @@ model Domain {
   projectId  String?
   serverId   String?
   status     String    @default("active")
+  /// Discovery metadata (confPath, webserver, root, upstreamPort). Never secrets.
+  metaJson   Json?
   archivedAt DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -571,6 +573,8 @@ model DatabaseInstance {
   port      Int?
   /// Reference to a secret manager entry only; never a secret value.
   adminSecretRef String?
+  /// Discovered schema names and scan metadata. Never credentials.
+  metaJson  Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

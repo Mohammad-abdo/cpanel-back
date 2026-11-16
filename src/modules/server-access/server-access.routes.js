@@ -17,6 +17,7 @@ import {
   serverIdParamsSchema,
   serviceBodySchema,
   writeBodySchema,
+  inventoryImportBodySchema,
 } from './server-access.validator.js';
 
 /** Shared instance: the terminal WebSocket (server.js) consumes tickets issued by these routes. */
@@ -53,3 +54,5 @@ serverAccessRouter.post('/:id/files/rename', owner, params, validate(renameBodyS
 serverAccessRouter.delete('/:id/files', owner, params, validate(deleteQuerySchema, 'query'), wrap(c.remove));
 
 serverAccessRouter.post('/:id/terminal/ticket', owner, params, wrap(c.ticket));
+serverAccessRouter.post('/:id/inventory/scan', owner, params, wrap(c.scanInventory));
+serverAccessRouter.post('/:id/inventory/import', owner, params, validate(inventoryImportBodySchema, 'body'), wrap(c.importInventory));

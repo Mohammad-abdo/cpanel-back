@@ -43,3 +43,14 @@ export const serviceBodySchema = z
     action: z.enum(['start', 'stop', 'restart', 'reload', 'status', 'enable', 'disable']),
   })
   .strict();
+
+/** Import selection after a scan. Empty arrays mean "skip that kind"; omit a key to import all of that kind from the latest scan payload embedded in the request. */
+export const inventoryImportBodySchema = z
+  .object({
+    projects: z.array(z.string().min(1).max(300)).max(200).optional(),
+    domains: z.array(z.string().min(1).max(253)).max(200).optional(),
+    databases: z.array(z.enum(['mysql', 'postgres'])).max(4).optional(),
+    /** When true, import every candidate returned by an inline scan (paths/names ignored). */
+    importAll: z.boolean().optional(),
+  })
+  .strict();

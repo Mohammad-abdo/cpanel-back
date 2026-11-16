@@ -3,6 +3,7 @@ import path from 'node:path';
 import { AppError } from '../../common/errors/app-error.js';
 import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { execCommand, openSftp } from './ssh.connector.js';
+import { INVENTORY_SCRIPT, parseInventory } from './server-inventory.scan.js';
 
 const posix = path.posix;
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
@@ -392,6 +393,201 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       } finally {
         client.end();
       }
+    },
+
+    // ---- inventory (read-only scan + import into panel records) ------------------------------
+    /** SSH scan: projects, vhosts, database engines/schemas. Does not write on the remote host. */
+    async scanInventory(serverId, actor) {
+      requireOwner(actor);
+      const cred = await loadCredential(serverId);
+      const { client } = await connectWith(cred);
+      try {
+        const res = await execCommand(client, INVENTORY_SCRIPT, { maxBytes: 768 * 1024, timeoutMs: 45_000 });
+        const inventory = parseInventory(res.stdout);
+        await audit({
+          actorId: actor.id,
+          action: 'server.inventory.scan',
+          resourceId: serverId,
+          result: 'success',
+          after: {
+            projects: inventory.projects.length,
+            domains: inventory.domains.length,
+            databases: inventory.databases.length,
+          },
+        });
+        return inventory;
+      } finally {
+        client.end();
+      }
+    },
+
+    /**
+     * Import scanned candidates into panel records (discovered projects, domains, DB instances).
+     * Re-scans over SSH so the import matches the live host; selection filters what is written.
+     */
+    async importInventory(serverId, selection, actor) {
+      requireOwner(actor);
+      const server = await prisma.server.findUnique({ where: { id: serverId } });
+      if (!server || server.archivedAt) throw new AppError(404, 'SERVER_NOT_FOUND', 'Server not found');
+      const inventory = await this.scanInventory(serverId, actor);
+      const importAll = Boolean(selection?.importAll);
+      const wantProjects = importAll || selection?.projects === undefined ? null : new Set(selection.projects);
+      const wantDomains = importAll || selection?.domains === undefined ? null : new Set(selection.domains.map((d) => d.toLowerCase()));
+      const wantDbs = importAll || selection?.databases === undefined ? null : new Set(selection.databases);
+
+      const created = { projects: [], domains: [], databases: [] };
+      const skipped = { projects: [], domains: [], databases: [] };
+
+      for (const c of inventory.projects) {
+        if (wantProjects && !wantProjects.has(c.path) && !wantProjects.has(c.slug)) {
+          skipped.projects.push({ name: c.name, reason: 'not-selected' });
+          continue;
+        }
+        const existing = await prisma.project.findFirst({ where: { serverId, slug: c.slug } });
+        if (existing) {
+          skipped.projects.push({ name: c.name, slug: c.slug, reason: 'already-known' });
+          continue;
+        }
+        const project = await prisma.project.create({
+          data: { serverId, name: c.name, slug: c.slug, type: c.type, status: 'discovered' },
+        });
+        await prisma.projectRuntime.create({
+          data: {
+            projectId: project.id,
+            runtime: c.runtime,
+            processManager: c.processManager,
+            metaJson: { discoveredPath: c.path, discoveredAt: inventory.scannedAt, readOnlyDiscovery: true, marker: c.marker },
+          },
+        });
+        created.projects.push(project);
+      }
+
+      for (const d of inventory.domains) {
+        if (wantDomains && !wantDomains.has(d.name)) {
+          skipped.domains.push({ name: d.name, reason: 'not-selected' });
+          continue;
+        }
+        const existing = await prisma.domain.findUnique({ where: { name: d.name } });
+        if (existing) {
+          if (existing.serverId === serverId || !existing.serverId) {
+            const updated = await prisma.domain.update({
+              where: { id: existing.id },
+              data: {
+                serverId,
+                status: existing.status === 'active' ? existing.status : 'discovered',
+                metaJson: {
+                  ...(existing.metaJson && typeof existing.metaJson === 'object' ? existing.metaJson : {}),
+                  confPath: d.confPath ?? null,
+                  webserver: d.webserver ?? null,
+                  root: d.root ?? null,
+                  upstreamPort: d.upstreamPort ?? null,
+                  discoveredAt: inventory.scannedAt,
+                },
+              },
+            });
+            created.domains.push(updated);
+          } else {
+            skipped.domains.push({ name: d.name, reason: 'owned-by-other-server' });
+          }
+          continue;
+        }
+        const row = await prisma.domain.create({
+          data: {
+            name: d.name,
+            serverId,
+            status: 'discovered',
+            metaJson: {
+              confPath: d.confPath ?? null,
+              webserver: d.webserver ?? null,
+              root: d.root ?? null,
+              upstreamPort: d.upstreamPort ?? null,
+              discoveredAt: inventory.scannedAt,
+            },
+          },
+        });
+        created.domains.push(row);
+      }
+
+      for (const db of inventory.databases) {
+        if (wantDbs && !wantDbs.has(db.engine)) {
+          skipped.databases.push({ engine: db.engine, reason: 'not-selected' });
+          continue;
+        }
+        const instanceName = `${server.alias}-${db.engine}`;
+        const existing = await prisma.databaseInstance.findFirst({
+          where: { serverId, engine: db.engine },
+        });
+        const metaJson = {
+          schemas: db.schemas ?? [],
+          discoveredAt: inventory.scannedAt,
+          readOnlyDiscovery: true,
+        };
+        if (existing) {
+          const updated = await prisma.databaseInstance.update({
+            where: { id: existing.id },
+            data: {
+              status: 'discovered',
+              host: existing.host ?? '127.0.0.1',
+              port: existing.port ?? db.port,
+              metaJson: {
+                ...(existing.metaJson && typeof existing.metaJson === 'object' ? existing.metaJson : {}),
+                ...metaJson,
+              },
+            },
+          });
+          created.databases.push(updated);
+        } else {
+          try {
+            const row = await prisma.databaseInstance.create({
+              data: {
+                serverId,
+                engine: db.engine,
+                name: instanceName,
+                status: 'discovered',
+                host: '127.0.0.1',
+                port: db.port,
+                metaJson,
+              },
+            });
+            created.databases.push(row);
+          } catch (err) {
+            // Older DB without metaJson column: create without it.
+            if (!/Unknown argument|metaJson/i.test(String(err?.message))) throw err;
+            const row = await prisma.databaseInstance.create({
+              data: {
+                serverId,
+                engine: db.engine,
+                name: instanceName,
+                status: 'discovered',
+                host: '127.0.0.1',
+                port: db.port,
+              },
+            });
+            created.databases.push({ ...row, metaJson, schemaPending: true });
+          }
+        }
+      }
+
+      await audit({
+        actorId: actor.id,
+        action: 'server.inventory.import',
+        resourceId: serverId,
+        result: 'success',
+        after: {
+          created: {
+            projects: created.projects.length,
+            domains: created.domains.length,
+            databases: created.databases.length,
+          },
+          skipped: {
+            projects: skipped.projects.length,
+            domains: skipped.domains.length,
+            databases: skipped.databases.length,
+          },
+        },
+      });
+
+      return { inventory, created, skipped };
     },
 
     // ---- terminal ----------------------------------------------------------------------------
