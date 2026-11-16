@@ -249,6 +249,7 @@ model Server {
   logSources LogSource[]
   securityEvents SecurityEvent[]
   activityEvents ActivityEvent[] @relation("ActivityServer")
+  mailService ServerMailService?
 
   @@index([status])
 }
@@ -528,6 +529,8 @@ model Domain {
   dnsRecords    DnsRecord[]
   certificates  SslCertificate[]
   environmentId String?
+  mailConfig    DomainMailConfig?
+  mailboxes     MailboxAccount[]
 }
 
 model DnsRecord {
@@ -1130,4 +1133,80 @@ model ProjectEnvVar {
   environment ProjectEnvironment @relation(fields: [environmentId], references: [id], onDelete: Cascade)
 
   @@unique([environmentId, key])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10 - Mail & Webmail (metadata only; TASK-034). Additive. No plaintext secrets, no DKIM private keys.
+// ---------------------------------------------------------------------------
+
+model ServerMailService {
+  id           String    @id @default(uuid())
+  serverId     String    @unique
+  /// disabled | enabled | error. "enabled" records intent only; it never installs anything.
+  status       String    @default("disabled")
+  /// True only after an authorized provisioning apply (TASK-035). Always false in slice 1.
+  provisioned  Boolean   @default(false)
+  mailHostname String?
+  stackVersion String?
+  portsJson    Json?
+  lastHealthAt DateTime?
+  lastHealthJson Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+}
+
+model DomainMailConfig {
+  id                 String   @id @default(uuid())
+  domainId           String   @unique
+  enabled            Boolean  @default(false)
+  catchAllMailboxId  String?
+  quotaDefaultMb     Int      @default(1024)
+  dkimSelector       String   @default("nt1")
+  /// Public key (TXT value) only. The private key never leaves the mail server.
+  dkimPublicKey      String?  @db.Text
+  /// pending | published | verified | error
+  dnsState           String   @default("pending")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+}
+
+model MailboxAccount {
+  id            String    @id @default(uuid())
+  domainId      String
+  localPart     String
+  displayName   String?
+  quotaMb       Int       @default(1024)
+  /// active | suspended | deleted (soft delete)
+  status        String    @default("active")
+  /// scrypt panel hash. Never returned by the API. The Dovecot-format hash is made on the server (TASK-035).
+  passwordHash  String?
+  passwordSetAt DateTime?
+  provisioned   Boolean   @default(false)
+  createdById   String?
+  deletedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  domain Domain               @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  events MailboxAuditEvent[]
+
+  @@unique([domainId, localPart])
+  @@index([domainId, status])
+}
+
+model MailboxAuditEvent {
+  id           String   @id @default(uuid())
+  mailboxId    String
+  actorId      String?
+  action       String
+  metadataJson Json?
+  createdAt    DateTime @default(now())
+
+  mailbox MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@index([mailboxId, createdAt])
 }

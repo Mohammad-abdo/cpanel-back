@@ -29,6 +29,9 @@ import { alertsRouter } from './modules/monitoring/monitoring.alerts.routes.js';
 import { membersRouter } from './modules/members/members.routes.js';
 import { activityRouter } from './modules/activity/activity.routes.js';
 import { notificationsRouter } from './modules/notifications/notifications.routes.js';
+import { mailServerRouter } from './modules/mail-server/mail-server.routes.js';
+import { mailDomainRouter } from './modules/mail-domain/mail-domain.routes.js';
+import { mailboxesRouter } from './modules/mailboxes/mailboxes.routes.js';
 
 export const apiRouter = Router();
 
@@ -42,6 +45,7 @@ apiRouter.use('/operations', operationsRouter);
 apiRouter.use('/rbac', rbacRouter);
 apiRouter.use('/servers', serverAccessRouter);
 apiRouter.use('/servers', serversRouter);
+apiRouter.use('/servers', mailServerRouter);
 apiRouter.use('/projects', projectEnvRouter);
 apiRouter.use('/projects', projectsRouter);
 apiRouter.use('/monitoring', monitoringRouter);
@@ -52,6 +56,8 @@ apiRouter.use('/notifications', notificationsRouter);
 apiRouter.use('/deployments', deploymentsRouter);
 apiRouter.use('/backups', backupsRouter);
 apiRouter.use('/domains', domainsRouter);
+apiRouter.use('/domains', mailDomainRouter);
+apiRouter.use('/mailboxes', mailboxesRouter);
 apiRouter.use('/logs', logsRouter);
 apiRouter.use('/security', securityRouter);
 apiRouter.use('/reports', reportsRouter);
