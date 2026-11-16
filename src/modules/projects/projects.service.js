@@ -387,6 +387,41 @@ export function createProjectsService({
       };
     },
 
+    /**
+     * Direct PM2 control for this project's matched process(es) over SSH.
+     * Owner MFA. Prefer an explicit name; otherwise uses the first live-matched process.
+     */
+    async pm2Control(id, { action, name } = {}, actor) {
+      if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
+      if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can control PM2 over SSH');
+      if (!serverAccessService?.pm2Control) throw new AppError(500, 'LIVE_UNAVAILABLE', 'PM2 control is not wired');
+      const project = await prisma.project.findUnique({ where: { id }, include: { runtime: true } });
+      if (!project || !(await access.canView(actor, id))) throw new AppError(404, 'PROJECT_NOT_FOUND', 'Project not found');
+      let target = name;
+      if (!target) {
+        const live = await this.live(id, actor);
+        target = live.processes?.[0]?.name || null;
+        if (!target && live.pm2Names?.length === 1) target = live.pm2Names[0];
+      }
+      if (!target) {
+        throw new AppError(
+          409,
+          'PM2_PROCESS_UNKNOWN',
+          'No PM2 process matched this project. Open the server PM2 tab or pass a process name.',
+        );
+      }
+      const result = await serverAccessService.pm2Control(project.serverId, { name: target, action }, actor);
+      await audit({
+        actorId: actor.id,
+        action: `project.pm2.${action}`,
+        resourceType: 'project',
+        resourceId: id,
+        result: result.ok ? 'success' : 'failure',
+        after: { name: target, serverId: project.serverId },
+      });
+      return { ...result, projectId: id, serverId: project.serverId };
+    },
+
     async archive(id, input, actor) {
       requireOwner(actor, 'archive projects');
       const project = await loadProject(id);

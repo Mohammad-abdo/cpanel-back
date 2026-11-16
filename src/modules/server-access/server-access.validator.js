@@ -44,6 +44,13 @@ export const serviceBodySchema = z
   })
   .strict();
 
+export const pm2BodySchema = z
+  .object({
+    name: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/, 'Invalid PM2 process name'),
+    action: z.enum(['start', 'stop', 'restart', 'reload', 'delete', 'logs', 'describe']),
+  })
+  .strict();
+
 /** Import selection after a scan. Empty arrays mean "skip that kind"; omit a key to import all of that kind from the latest scan payload embedded in the request. */
 export const inventoryImportBodySchema = z
   .object({

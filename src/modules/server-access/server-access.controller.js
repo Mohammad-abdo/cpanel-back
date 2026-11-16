@@ -51,6 +51,12 @@ export function createServerAccessController(svc) {
     async service(req, res) {
       res.status(200).json({ data: await svc.service(id(req), req.validated.body, req.user) });
     },
+    async pm2List(req, res) {
+      res.status(200).json({ data: await svc.pm2List(id(req), req.user) });
+    },
+    async pm2Control(req, res) {
+      res.status(200).json({ data: await svc.pm2Control(id(req), req.validated.body, req.user) });
+    },
     async ticket(req, res) {
       res.status(201).json({ data: await svc.createTicket(id(req), req.user) });
     },

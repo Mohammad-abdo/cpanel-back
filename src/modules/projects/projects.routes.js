@@ -8,6 +8,7 @@ import {
   discoverBodySchema,
   lifecycleBodySchema,
   lifecycleParamsSchema,
+  projectPm2BodySchema,
   linkBodySchema,
   listProjectsQuerySchema,
   projectIdParamsSchema,
@@ -44,6 +45,7 @@ projectsRouter.post('/discover', mfa, validate(discoverBodySchema, 'body'), wrap
 projectsRouter.get('/:id', requireSession(), params, wrap(c.get));
 projectsRouter.get('/:id/overview', requireSession(), params, validate(projectOverviewQuerySchema, 'query'), wrap(c.overview));
 projectsRouter.get('/:id/live', mfa, params, wrap(c.live));
+projectsRouter.post('/:id/pm2', mfa, params, validate(projectPm2BodySchema, 'body'), wrap(c.pm2Control));
 projectsRouter.get('/:id/members', requireSession(), params, wrap(c.members));
 projectsRouter.get('/:id/teams', requireSession(), params, wrap(c.teams));
 projectsRouter.post('/:id/teams', mfa, params, validate(projectTeamBodySchema, 'body'), wrap(c.linkTeam));

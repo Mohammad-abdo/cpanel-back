@@ -23,6 +23,14 @@ export const lifecycleParamsSchema = z
   .object({ id: z.string().uuid(), action: z.enum(['start', 'stop', 'restart']) })
   .strict();
 
+export const projectPm2BodySchema = z
+  .object({
+    action: z.enum(['start', 'stop', 'restart', 'reload', 'delete', 'logs', 'describe']),
+    /** Optional; when omitted the first live-matched PM2 process for this project is used. */
+    name: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).optional(),
+  })
+  .strict();
+
 const environmentsSchema = z
   .array(z.object({ code: envCode, displayName: z.string().min(1).max(80) }).strict())
   .min(1)

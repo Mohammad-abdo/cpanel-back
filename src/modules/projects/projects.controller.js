@@ -78,6 +78,10 @@ export function createProjectsController(projectsService) {
       res.status(200).json({ data: result });
     },
 
+    async pm2Control(req, res) {
+      res.status(200).json({ data: await projectsService.pm2Control(req.validated.params.id, req.validated.body, req.user) });
+    },
+
     async live(req, res) {
       res.status(200).json({ data: await projectsService.live(req.validated.params.id, req.user) });
     },

@@ -20,6 +20,7 @@ import {
   renameBodySchema,
   serverIdParamsSchema,
   serviceBodySchema,
+  pm2BodySchema,
   writeBodySchema,
   inventoryImportBodySchema,
 } from './server-access.validator.js';
@@ -47,6 +48,8 @@ serverAccessRouter.delete('/:id/ssh', owner, params, wrap(c.removeCredential));
 serverAccessRouter.post('/:id/ssh/test', owner, params, wrap(c.test));
 serverAccessRouter.get('/:id/ssh/info', owner, params, wrap(c.info));
 serverAccessRouter.post('/:id/ssh/service', owner, params, validate(serviceBodySchema, 'body'), wrap(c.service));
+serverAccessRouter.get('/:id/ssh/pm2', owner, params, wrap(c.pm2List));
+serverAccessRouter.post('/:id/ssh/pm2', owner, params, validate(pm2BodySchema, 'body'), wrap(c.pm2Control));
 
 const dbParams = validate(dbEngineParamsSchema, 'params');
 serverAccessRouter.get('/:id/ssh/db/:engine/schemas', owner, dbParams, wrap(c.dbSchemas));

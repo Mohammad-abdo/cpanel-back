@@ -24,6 +24,14 @@ import {
   postgresCmdInDb,
   selectRowsSql,
 } from './db-live.scan.js';
+import {
+  PM2_ACTIONS,
+  assertSafePm2Name,
+  parsePm2ActionOutput,
+  parsePm2List,
+  pm2ActionScript,
+  pm2ListScript,
+} from './pm2-live.scan.js';
 
 const posix = path.posix;
 export const MAX_EDIT_BYTES = 1024 * 1024; // view/edit in the browser
@@ -470,6 +478,77 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           const parsed = parseServerInfo(res.stdout);
           const summary = await recordSshMetrics(serverId, parsed);
           return { ...parsed, collectedAt: now().toISOString(), summary };
+        } finally {
+          client.end();
+        }
+      });
+    },
+
+    /** List all PM2 processes on the server (Owner MFA). */
+    async pm2List(serverId, actor) {
+      requireOwner(actor);
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execScript(client, pm2ListScript(), { maxBytes: 1024 * 1024, timeoutMs: 60_000 });
+          if (res.timedOut) throw new AppError(504, 'PM2_TIMEOUT', 'PM2 list timed out over SSH');
+          const parsed = parsePm2List(res.stdout);
+          if (!parsed.pm2Bin || parsed.pm2Bin === 'missing') {
+            throw new AppError(404, 'PM2_NOT_FOUND', 'pm2 is not installed or not on PATH for the SSH user');
+          }
+          return parsed;
+        } finally {
+          client.end();
+        }
+      });
+    },
+
+    /** Control one PM2 process: start|stop|restart|reload|delete|logs|describe. */
+    async pm2Control(serverId, { name, action }, actor) {
+      requireOwner(actor);
+      assertSafePm2Name(name);
+      if (!PM2_ACTIONS.includes(action)) throw new AppError(422, 'PM2_ACTION_INVALID', 'Invalid PM2 action');
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execScript(client, pm2ActionScript(action), {
+            args: [name],
+            maxBytes: 256 * 1024,
+            timeoutMs: 90_000,
+          });
+          if (res.timedOut) throw new AppError(504, 'PM2_TIMEOUT', `PM2 ${action} timed out over SSH`);
+          const parsed = parsePm2ActionOutput(res.stdout);
+          const ok =
+            action === 'logs' || action === 'describe'
+              ? true
+              : parsed.exitCode === 0 || (parsed.exitCode == null && res.code === 0);
+          if (action !== 'logs' && action !== 'describe') {
+            await audit({
+              actorId: actor.id,
+              action: `server.pm2.${action}`,
+              resourceId: serverId,
+              result: ok ? 'success' : 'failure',
+              after: { name, exitCode: parsed.exitCode ?? res.code },
+            });
+          }
+          if (!ok) {
+            throw new AppError(
+              502,
+              'PM2_ACTION_FAILED',
+              parsed.output
+                ? `PM2 ${action} failed: ${parsed.output.slice(0, 240)}`
+                : `PM2 ${action} failed for ${name}`,
+            );
+          }
+          return { name, action, ok, exitCode: parsed.exitCode ?? res.code, output: parsed.output, collectedAt: parsed.collectedAt };
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          if (err?.code === 'PM2_NAME_INVALID' || err?.code === 'PM2_ACTION_INVALID') {
+            throw new AppError(422, err.code, err.message);
+          }
+          throw new AppError(502, 'PM2_ACTION_FAILED', err?.message || 'PM2 action failed');
         } finally {
           client.end();
         }
