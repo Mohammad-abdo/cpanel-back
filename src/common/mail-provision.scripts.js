@@ -180,18 +180,27 @@ const STEP_SCRIPTS = {
     "printf 'enabled = false;\\n' > /etc/rspamd/local.d/dkim_signing.conf",
   ),
 
-  // $1 = mail hostname. Reuses a letsencrypt cert when present, otherwise a flagged self-signed placeholder.
+  // $1 = mail hostname. Prefer Let's Encrypt for the mail host, then the parent apex
+  // (mail.example.com → example.com), else a flagged self-signed placeholder.
   tls: lines(
     'mkdir -p /etc/ssl/nt-mail && chmod 0755 /etc/ssl/nt-mail',
-    'LE="/etc/letsencrypt/live/$1"',
-    'if [ -s "$LE/fullchain.pem" ] && [ -s "$LE/privkey.pem" ]; then',
-    '  ln -sf "$LE/fullchain.pem" /etc/ssl/nt-mail/fullchain.pem; ln -sf "$LE/privkey.pem" /etc/ssl/nt-mail/privkey.pem',
+    'host="$1"',
+    'apex="${host#mail.}"',
+    'pick=""',
+    'for cand in "$host" "$apex"; do',
+    '  if [ -n "$cand" ] && [ -s "/etc/letsencrypt/live/$cand/fullchain.pem" ] && [ -s "/etc/letsencrypt/live/$cand/privkey.pem" ]; then pick="$cand"; break; fi',
+    'done',
+    'if [ -n "$pick" ]; then',
+    '  ln -sfn "/etc/letsencrypt/live/$pick/fullchain.pem" /etc/ssl/nt-mail/fullchain.pem',
+    '  ln -sfn "/etc/letsencrypt/live/$pick/privkey.pem" /etc/ssl/nt-mail/privkey.pem',
+    '  echo "NT_RESULT tls=existing tls_name=$pick"',
+    'elif [ -L /etc/ssl/nt-mail/fullchain.pem ] && [ -s /etc/ssl/nt-mail/fullchain.pem ]; then',
     '  echo "NT_RESULT tls=existing"',
     'elif [ -s /etc/ssl/nt-mail/fullchain.pem ] && [ ! -L /etc/ssl/nt-mail/fullchain.pem ]; then',
     '  echo "NT_RESULT tls=selfsigned-placeholder"',
     'else',
     '  rm -f /etc/ssl/nt-mail/fullchain.pem /etc/ssl/nt-mail/privkey.pem',
-    '  openssl req -x509 -newkey rsa:3072 -nodes -days 90 -subj "/CN=$1" -keyout /etc/ssl/nt-mail/privkey.pem -out /etc/ssl/nt-mail/fullchain.pem >/dev/null 2>&1',
+    '  openssl req -x509 -newkey rsa:3072 -nodes -days 90 -subj "/CN=$host" -keyout /etc/ssl/nt-mail/privkey.pem -out /etc/ssl/nt-mail/fullchain.pem >/dev/null 2>&1',
     '  chmod 0600 /etc/ssl/nt-mail/privkey.pem',
     '  echo "NT_RESULT tls=selfsigned-placeholder"',
     'fi',
@@ -350,14 +359,45 @@ export function evaluatePrerequisites(kv) {
   return { ok: blockers.length === 0, blockers, warnings };
 }
 
-/** Interprets the health probe into per-check pass/fail. */
+/** Interprets the health probe into per-check pass/fail. Self-signed TLS is a warning, not a hard fail. */
 export function evaluateHealth(kv) {
   const checks = [];
   for (const s of ['postfix', 'dovecot', 'opendkim', 'rspamd']) checks.push({ id: `service.${s}`, pass: kv[`svc_${s}`] === 'active', detail: kv[`svc_${s}`] ?? 'unknown' });
   for (const p of MAIL_FIREWALL_PORTS) checks.push({ id: `port.${p}`, pass: kv[`port_${p}`] === 'up', detail: kv[`port_${p}`] ?? 'unknown' });
   checks.push({ id: 'open_relay', pass: kv.open_relay === 'closed', detail: kv.open_relay ?? 'unknown' });
-  checks.push({ id: 'tls', pass: kv.tls === 'existing', detail: kv.tls === 'selfsigned-placeholder' ? 'self-signed placeholder: replace with a real certificate' : (kv.tls ?? 'unknown') });
-  return { ok: checks.every((c) => c.pass), openRelay: kv.open_relay ?? 'unknown', tls: kv.tls ?? 'unknown', stackVersion: kv.postfix_version || null, checks };
+  const tls = kv.tls ?? 'unknown';
+  if (tls === 'existing') {
+    checks.push({ id: 'tls', pass: true, warn: false, detail: kv.tls_name ? `letsencrypt:${kv.tls_name}` : 'letsencrypt' });
+  } else if (tls === 'selfsigned-placeholder') {
+    checks.push({
+      id: 'tls',
+      pass: true,
+      warn: true,
+      detail: 'self-signed placeholder — issue a real certificate for the mail hostname (or apex) then re-run health',
+    });
+  } else {
+    checks.push({ id: 'tls', pass: false, warn: false, detail: tls });
+  }
+  return { ok: checks.every((c) => c.pass), openRelay: kv.open_relay ?? 'unknown', tls, stackVersion: kv.postfix_version || null, checks };
+}
+
+/** Softens stored health rows that still mark the intentional self-signed placeholder as a hard fail. */
+export function normalizeStoredHealth(stored) {
+  if (!stored || !Array.isArray(stored.checks)) return stored;
+  const checks = stored.checks.map((c) => {
+    if (c?.id !== 'tls') return c;
+    const detail = String(c.detail ?? '');
+    if (stored.tls === 'selfsigned-placeholder' || /self-signed/i.test(detail)) {
+      return {
+        ...c,
+        pass: true,
+        warn: true,
+        detail: 'self-signed placeholder — issue a real certificate for the mail hostname (or apex) then re-run health',
+      };
+    }
+    return c;
+  });
+  return { ...stored, checks, ok: checks.every((c) => c.pass) };
 }
 
 export const PROVISION_STEPS = Object.freeze([

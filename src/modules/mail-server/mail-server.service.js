@@ -13,6 +13,7 @@ import {
   firewallScript,
   firewallStatusScript,
   healthScript,
+  normalizeStoredHealth,
   parseKeyValues,
   preflightScript,
   stepScript,
@@ -24,7 +25,8 @@ export const MAIL_PORTS = Object.freeze([
   { port: 465, protocol: 'smtps', role: 'Submission (implicit TLS)' },
   { port: 587, protocol: 'submission', role: 'Submission (STARTTLS)' },
   { port: 993, protocol: 'imaps', role: 'IMAPS' },
-  { port: 2096, protocol: 'https', role: 'Webmail (TASK-037)' },
+  // No listener until TASK-037 ships the webmail SPA on this port.
+  { port: 2096, protocol: 'https', role: 'Webmail (TASK-037)', planned: true },
 ]);
 
 /** Pure planner: the exact ordered steps apply runs. The firewall is a separate CRITICAL action (never part of apply). */
@@ -133,7 +135,7 @@ export function createMailServerService({ prisma, now = () => new Date(), auditS
     async health(serverId, actor) {
       const server = await access.requireServerVisible(actor, serverId);
       const { row } = await current(serverId);
-      const stored = row?.lastHealthJson?.health ?? null;
+      const stored = normalizeStoredHealth(row?.lastHealthJson?.health ?? null);
       return {
         serverId: server.id,
         checked: Boolean(row?.lastHealthAt),
@@ -205,20 +207,40 @@ export function createMailServerService({ prisma, now = () => new Date(), auditS
       if (!host) throw new AppError(422, 'MAIL_HOSTNAME_REQUIRED', 'A mail hostname is required to provision');
       const steps = planProvisioning({ serverAlias: server.alias, mailHostname: host });
       if (!platform?.gate) throw new AppError(500, 'GATE_UNAVAILABLE', 'Approval service is not wired');
-      const gate = await platform.gate(
-        {
-          action: 'mail.provision.apply',
-          binding: sha256(JSON.stringify(PROVISION_STEP_ORDER.concat([serverId, host]))),
-          resourceType: 'server',
-          resourceId: serverId,
-          approvalId: input.approvalId,
-          reason: input.reason,
-          impact: steps.filter((s) => s.requiresApproval).map((s) => s.title),
-          rollbackPlan: input.rollbackNote ?? ROLLBACK_NOTES[2],
-          context: { host },
-        },
-        actor,
-      );
+      let gate;
+      try {
+        gate = await platform.gate(
+          {
+            action: 'mail.provision.apply',
+            binding: sha256(JSON.stringify(PROVISION_STEP_ORDER.concat([serverId, host]))),
+            resourceType: 'server',
+            resourceId: serverId,
+            approvalId: input.approvalId,
+            reason: input.reason,
+            impact: steps.filter((s) => s.requiresApproval).map((s) => s.title),
+            rollbackPlan: input.rollbackNote ?? ROLLBACK_NOTES[2],
+            context: { host },
+          },
+          actor,
+        );
+      } catch (e) {
+        // Client timed out / retried after the SSH apply already claimed the approval and succeeded.
+        if (e?.code === 'APPROVAL_CONSUMED' && row?.provisioned) {
+          return {
+            approvalRequired: false,
+            ok: true,
+            alreadyDone: true,
+            serverId,
+            mailHostname: host,
+            steps: row?.lastHealthJson?.provision?.steps ?? [],
+            failedStep: null,
+            stackVersion: row?.stackVersion ?? null,
+            health: null,
+            rollbackNotes: [],
+          };
+        }
+        throw e;
+      }
       if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
       requireExecutor();
 

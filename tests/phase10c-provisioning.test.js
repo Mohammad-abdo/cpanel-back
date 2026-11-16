@@ -107,6 +107,10 @@ describe('script generators', () => {
     expect(S.evaluatePrerequisites(S.parseKeyValues('os_id=debian\nos_version=12\nis_root=no')).blockers.length).toBeGreaterThan(1);
     expect(S.evaluateHealth(S.parseKeyValues(GOOD_HEALTH)).ok).toBe(true);
     expect(S.evaluateHealth(S.parseKeyValues(GOOD_HEALTH.replace('closed', 'open'))).checks.find((c) => c.id === 'open_relay').pass).toBe(false);
+    const selfSigned = S.evaluateHealth(S.parseKeyValues(GOOD_HEALTH.replace('tls=existing', 'tls=selfsigned-placeholder')));
+    expect(selfSigned.ok).toBe(true);
+    expect(selfSigned.checks.find((c) => c.id === 'tls')).toMatchObject({ pass: true, warn: true });
+    expect(S.normalizeStoredHealth({ ok: false, tls: 'selfsigned-placeholder', checks: [{ id: 'tls', pass: false, detail: 'self-signed placeholder: replace with a real certificate' }] }).ok).toBe(true);
   });
 });
 
