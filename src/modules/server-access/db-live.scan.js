@@ -39,40 +39,29 @@ function pgIdent(name) {
 /**
  * MySQL/MariaDB CLI with several auth fallbacks.
  * Copies debian.cnf via sudo when the SSH user cannot read it, then tries socket sudo.
- * Aggregates stderr so "command not found" does not hide the real Access denied.
  */
 export function mysqlCmd(sql, db = null) {
   const q = shQuote(sql);
   const dbArg = db ? ` ${shQuote(assertSafeDbName(db))}` : '';
   const flags = `--batch --raw --default-character-set=utf8mb4${dbArg} -e ${q}`;
-  return `
-set +e
-ERRFILE=$(mktemp)
-CFG=$(mktemp)
-OUT=""
-ERRS=""
-if [ -r /etc/mysql/debian.cnf ]; then cp /etc/mysql/debian.cnf "$CFG"
-elif command -v sudo >/dev/null 2>&1 && sudo -n test -r /etc/mysql/debian.cnf 2>/dev/null; then sudo -n cat /etc/mysql/debian.cnf >"$CFG" 2>/dev/null
-fi
-run_one() {
-  local o
-  o=$(eval "$1" 2>>"$ERRFILE")
-  if [ $? -eq 0 ] && [ -n "$o" ]; then OUT="$o"; return 0; fi
-  return 1
-}
-run_one "sudo -n mysql ${flags}" || \\
-run_one "sudo -n mysql --protocol=socket ${flags}" || \\
-{ [ -s "$CFG" ] && run_one "sudo -n mysql --defaults-extra-file=$CFG ${flags}"; } || \\
-{ [ -s "$CFG" ] && run_one "mysql --defaults-extra-file=$CFG ${flags}"; } || \\
-run_one "mysql ${flags}" || true
-printf '%s' "$OUT"
-if [ -z "$OUT" ]; then
-  ERRS=$(tr '\\n' '|' <"$ERRFILE" | sed 's/|\\+/ | /g' | cut -c1-400)
-  printf '\\n__NT_ERR__%s' "$ERRS" >&2
-fi
-rm -f "$ERRFILE" "$CFG"
-[ -n "$OUT" ]
-`.replace(/\n+/g, '; ').trim();
+  // One bash -c script; capture EC after each attempt (if tests reset $?).
+  return [
+    'ERRFILE=$(mktemp)',
+    'CFG=$(mktemp)',
+    'OUT=""',
+    'EC=1',
+    'if [ -r /etc/mysql/debian.cnf ]; then cp /etc/mysql/debian.cnf "$CFG"; fi',
+    'if [ ! -s "$CFG" ] && sudo -n test -r /etc/mysql/debian.cnf 2>/dev/null; then sudo -n cat /etc/mysql/debian.cnf >"$CFG" 2>/dev/null; fi',
+    `OUT=$(sudo -n mysql ${flags} 2>>"$ERRFILE"); EC=$?`,
+    'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then OUT=$(sudo -n mysql --protocol=socket ' + flags + ' 2>>"$ERRFILE"); EC=$?; fi',
+    'if { [ "$EC" -ne 0 ] || [ -z "$OUT" ]; } && [ -s "$CFG" ]; then OUT=$(mysql --defaults-extra-file="$CFG" ' + flags + ' 2>>"$ERRFILE"); EC=$?; fi',
+    'if { [ "$EC" -ne 0 ] || [ -z "$OUT" ]; } && [ -s "$CFG" ]; then OUT=$(sudo -n mysql --defaults-extra-file="$CFG" ' + flags + ' 2>>"$ERRFILE"); EC=$?; fi',
+    'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then OUT=""; fi',
+    'printf "%s" "$OUT"',
+    'if [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+    'rm -f "$ERRFILE" "$CFG"',
+    '[ -n "$OUT" ]',
+  ].join('; ');
 }
 
 export function postgresCmd(sql) {
