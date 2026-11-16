@@ -95,5 +95,6 @@ export const instanceRestoreQuerySchema = z
     db: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
     /** Must equal the target db name, or ALL when restoring without db. */
     confirm: z.string().min(1).max(64),
+    ...approvalFields,
   })
   .strict();

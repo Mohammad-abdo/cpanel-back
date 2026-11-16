@@ -66,6 +66,20 @@ beforeEach(async () => {
 
 const auditActions = () => prisma.auditEvent.rows.map((r) => r.action);
 
+/**
+ * High/Critical actions answer 202 until a different person approves. Sends the request with reason + rollback,
+ * expects 202, approves as a second Owner, then replays with the approvalId and returns the final response.
+ */
+async function sendGated(send) {
+  const first = await send({ reason: 'Planned maintenance window', rollbackNote: 'Start the process again' });
+  expect(first.status).toBe(202);
+  expect(first.body.data.approvalRequired).toBe(true);
+  const approver = await actor({ ownerFlag: true });
+  const dec = await request(app).post(`/api/v1/platform/approvals/${first.body.data.approvalId}/decision`).set(approver.h).send({ decision: 'approve' });
+  expect(dec.status).toBe(200);
+  return send({ approvalId: first.body.data.approvalId });
+}
+
 describe('authn/authz on the live routes', () => {
   it('401 without a session and 403 OWNER_ONLY for a non-owner on every owner route', async () => {
     const sid = ctx.server.id;
@@ -155,7 +169,8 @@ describe('server PM2 routes', () => {
     expect(res.body.data).toMatchObject({ total: 2, online: 1 });
   });
   it('POST controls a process and audits; validator rejects bad bodies', async () => {
-    const ok = await request(app).post(base()).set(owner.h).send({ name: 'shop-api', action: 'reload' });
+    // reload is High risk: 202 first, then the approved replay runs it (gate legitimately changes this expectation).
+    const ok = await sendGated((extra) => request(app).post(base()).set(owner.h).send({ name: 'shop-api', action: 'reload', ...extra }));
     expect(ok.status).toBe(200);
     expect(ok.body.data).toMatchObject({ ok: true, action: 'reload' });
     expect(auditActions()).toContain('server.pm2.reload');
@@ -190,13 +205,13 @@ describe('project /live and /pm2', () => {
     expect((await request(app).get(`/api/v1/projects/${randomUUID()}/live`).set(owner.h)).status).toBe(404);
   });
   it('POST /pm2 with an explicit name controls it and writes a project audit event', async () => {
-    const res = await request(app).post(`/api/v1/projects/${ctx.project.id}/pm2`).set(owner.h).send({ action: 'restart', name: 'shop-api' });
+    const res = await sendGated((extra) => request(app).post(`/api/v1/projects/${ctx.project.id}/pm2`).set(owner.h).send({ action: 'restart', name: 'shop-api', ...extra }));
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ ok: true, projectId: ctx.project.id, serverId: ctx.server.id });
     expect(auditActions()).toEqual(expect.arrayContaining(['server.pm2.restart', 'project.pm2.restart']));
   });
   it('POST /pm2 without a name targets the first live-matched process', async () => {
-    const res = await request(app).post(`/api/v1/projects/${ctx.project.id}/pm2`).set(owner.h).send({ action: 'stop' });
+    const res = await sendGated((extra) => request(app).post(`/api/v1/projects/${ctx.project.id}/pm2`).set(owner.h).send({ action: 'stop', ...extra }));
     expect(res.status).toBe(200);
     expect(prisma.auditEvent.rows.find((r) => r.action === 'project.pm2.stop').afterJson).toMatchObject({ name: 'shop-api' });
   });
@@ -265,7 +280,8 @@ describe('live database routes', () => {
   const restore = (qs, body = '-- restore\nCREATE TABLE t (id int);\n') =>
     request(app).post(`${live('restore')}?${qs}`).set(owner.h).set('Content-Type', 'application/octet-stream').send(Buffer.from(body));
   it('restore succeeds with the typed confirmation and is audited', async () => {
-    const res = await restore('db=shop_db&confirm=shop_db');
+    // Live restore is Critical: 202 first, then the approved replay (same dump bytes) runs it.
+    const res = await sendGated((extra) => restore(`db=shop_db&confirm=shop_db&${new URLSearchParams(extra)}`));
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ restored: true, db: 'shop_db' });
     expect(auditActions()).toContain('server.db.restore');

@@ -18,7 +18,10 @@ async function setup(over = {}) {
   });
   const ssh = createFakeSsh({ respond: liveResponder(over) });
   const auditService = { record: vi.fn(async () => ({})) };
-  const svc = createServerAccessService({ prisma, connector: ssh.connector, auditService, credentialKey: () => KEY });
+  // PM2 stop/restart/reload are approval-gated; these tests cover the SSH behaviour behind the gate, so the gate
+  // is stubbed open here. The real gate flow (202, mismatch, replay, self-approval) is in pm2-restore-gate.test.js.
+  const platform = { gate: vi.fn(async () => ({ proceed: true, approval: null })) };
+  const svc = createServerAccessService({ prisma, connector: ssh.connector, auditService, credentialKey: () => KEY, platform });
   return { prisma, server, serverId: server.id, ssh, auditService, svc };
 }
 const audits = (t) => t.auditService.record.mock.calls.map((c) => c[0]);

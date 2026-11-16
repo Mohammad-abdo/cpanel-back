@@ -28,6 +28,9 @@ export const projectPm2BodySchema = z
     action: z.enum(['start', 'stop', 'restart', 'reload', 'delete', 'logs', 'describe']),
     /** Optional; when omitted the first live-matched PM2 process for this project is used. */
     name: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/).optional(),
+    reason: z.string().min(5).max(500).optional(),
+    rollbackNote: z.string().min(5).max(500).optional(),
+    approvalId: z.string().uuid().optional(),
   })
   .strict();
 

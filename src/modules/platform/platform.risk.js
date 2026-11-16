@@ -18,6 +18,11 @@ export const ACTION_RISK = Object.freeze({
   'firewall.change': RISK.HIGH,
   'firewall.change.sensitive': RISK.CRITICAL,
   'emergency.owner': RISK.CRITICAL,
+  'db.restore.live': RISK.CRITICAL,
+  'pm2.stop': RISK.HIGH,
+  'pm2.restart': RISK.HIGH,
+  'pm2.reload': RISK.HIGH,
+  'pm2.delete': RISK.HIGH,
 });
 
 export const requiresApproval = (action) => {

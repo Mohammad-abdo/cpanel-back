@@ -392,7 +392,7 @@ export function createProjectsService({
      * Direct PM2 control for this project's matched process(es) over SSH.
      * Owner MFA. Prefer an explicit name; otherwise uses the first live-matched process.
      */
-    async pm2Control(id, { action, name } = {}, actor) {
+    async pm2Control(id, { action, name, reason, rollbackNote, approvalId } = {}, actor) {
       if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
       if (!actor.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can control PM2 over SSH');
       if (!serverAccessService?.pm2Control) throw new AppError(500, 'LIVE_UNAVAILABLE', 'PM2 control is not wired');
@@ -411,7 +411,9 @@ export function createProjectsService({
           'No PM2 process matched this project. Open the server PM2 tab or pass a process name.',
         );
       }
-      const result = await serverAccessService.pm2Control(project.serverId, { name: target, action }, actor);
+      const result = await serverAccessService.pm2Control(project.serverId, { name: target, action, reason, rollbackNote, approvalId }, actor);
+      // High-risk actions answer { approvalRequired, approval } until approved; nothing ran, so nothing is audited here.
+      if (result?.approvalRequired) return result;
       await audit({
         actorId: actor.id,
         action: `project.pm2.${action}`,

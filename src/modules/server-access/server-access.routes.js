@@ -6,6 +6,7 @@ import { createAuditService } from '../audit/audit.service.js';
 import { createServerAccessController } from './server-access.controller.js';
 import { MAX_EDIT_BYTES, MAX_UPLOAD_BYTES, createServerAccessService } from './server-access.service.js';
 import { createSshConnector } from './ssh.connector.js';
+import { getDeps } from '../platform/platform.wiring.js';
 import {
   addServerBodySchema,
   credentialBodySchema,
@@ -30,6 +31,7 @@ export const serverAccessService = createServerAccessService({
   prisma,
   connector: createSshConnector({ timeoutMs: 30_000 }),
   auditService: createAuditService({ prisma }),
+  platform: getDeps().platform,
 });
 const c = createServerAccessController(serverAccessService);
 const owner = requireSession({ requireMfa: true });

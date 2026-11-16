@@ -59,10 +59,8 @@ export function createDatabasesController(svc) {
     },
     async liveRestore(req, res) {
       const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? []);
-      const { db, confirm } = req.validated.query;
-      res.status(200).json({
-        data: await svc.liveRestore(req.validated.params.id, { db: db || null, bytes, confirm }, req.user),
-      });
+      const { db, confirm, reason, rollbackNote, approvalId } = req.validated.query;
+      respond(res, await svc.liveRestore(req.validated.params.id, { db: db || null, bytes, confirm, reason, rollbackNote, approvalId }, req.user));
     },
     async create(req, res) {
       respond(res, await svc.create(req.validated.body, req.user), 201);

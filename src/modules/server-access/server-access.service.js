@@ -142,7 +142,12 @@ export function normalizeRemotePath(p, home = '/') {
  * Owner-only SSH access: register servers by SSH credentials, file manager over SFTP, terminal tickets.
  * The password is encrypted with CREDENTIAL_ENCRYPTION_KEY (fails closed if missing) and never returned.
  */
-export function createServerAccessService({ prisma, connector, auditService = null, now = () => new Date(), credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY }) {
+/** PM2 actions that interrupt a running process: High risk, approval-gated (platform.risk ACTION_RISK). */
+export const GATED_PM2_ACTIONS = Object.freeze(['stop', 'restart', 'reload', 'delete']);
+/** Read-only or non-interrupting actions that need no approval. Anything else is gated (fail closed). */
+export const UNGATED_PM2_ACTIONS = Object.freeze(['start', 'logs', 'describe']);
+
+export function createServerAccessService({ prisma, connector, auditService = null, platform = null, now = () => new Date(), credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY }) {
   const audit = (event) => (auditService?.record ? auditService.record({ resourceType: 'server', ...event }) : null);
   const tickets = new Map();
   /** Serialize SSH sessions per server so live polls + service actions do not stampede and time out. */
@@ -515,10 +520,28 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     },
 
     /** Control one PM2 process: start|stop|restart|reload|delete|logs|describe. */
-    async pm2Control(serverId, { name, action }, actor) {
+    async pm2Control(serverId, { name, action, reason, rollbackNote, approvalId }, actor) {
       requireOwner(actor);
       assertSafePm2Name(name);
       if (!PM2_ACTIONS.includes(action)) throw new AppError(422, 'PM2_ACTION_INVALID', 'Invalid PM2 action');
+      if (!UNGATED_PM2_ACTIONS.includes(action)) {
+        if (!platform?.gate) throw new AppError(500, 'GATE_UNAVAILABLE', 'Approval service is not wired');
+        const gate = await platform.gate(
+          {
+            action: `pm2.${action}`,
+            binding: name,
+            resourceType: 'server',
+            resourceId: serverId,
+            approvalId,
+            reason,
+            impact: [`PM2 ${action} of process ${name} on this server`, 'Requests handled by this process may be interrupted'],
+            rollbackPlan: rollbackNote,
+            context: { name },
+          },
+          actor,
+        );
+        if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
+      }
       return withSshLock(serverId, async () => {
         const cred = await loadCredential(serverId);
         const { client } = await connectWith(cred);

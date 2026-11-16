@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { AppError } from '../../common/errors/app-error.js';
 import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
@@ -145,7 +145,7 @@ export function createDatabasesService({
       return serverAccessService.dbDump(row.serverId, { engine: row.engine, db: db || null, auth: instanceAuth(row) }, actor);
     },
 
-    async liveRestore(id, { db = null, bytes, confirm }, actor) {
+    async liveRestore(id, { db = null, bytes, confirm, reason, rollbackNote, approvalId }, actor) {
       requireOwner(actor);
       if (!serverAccessService?.dbRestore) throw new AppError(500, 'LIVE_UNAVAILABLE', 'Live restore is not wired');
       const row = await loadInstance(id, actor);
@@ -153,6 +153,27 @@ export function createDatabasesService({
       if (row.engine !== 'mysql' && row.engine !== 'postgres') {
         throw new AppError(422, 'ENGINE_UNSUPPORTED', 'Restore supports MySQL and Postgres only');
       }
+      // Typed confirmation and a sane upload are checked before an approval is ever requested.
+      const target = db || 'ALL';
+      if (confirm !== target) throw new AppError(422, 'CONFIRM_MISMATCH', `Type ${target} to confirm restore`);
+      if (!Buffer.isBuffer(bytes) || bytes.length < 8) throw new AppError(422, 'DUMP_INVALID', 'Upload a non-empty .sql dump');
+      if (!platform?.gate) throw new AppError(500, 'GATE_UNAVAILABLE', 'Approval service is not wired');
+      const gate = await platform.gate(
+        {
+          action: 'db.restore.live',
+          // Bound to the target and the exact dump content: an approval cannot be reused for another file.
+          binding: `${target}:${createHash('sha256').update(bytes).digest('hex')}`,
+          resourceType: 'database_instance',
+          resourceId: id,
+          approvalId,
+          reason,
+          impact: [`Restore a ${bytes.length}-byte SQL dump into ${target} on ${row.engine} instance ${row.name}`, 'Existing data may be overwritten'],
+          rollbackPlan: rollbackNote,
+          context: { engine: row.engine, target, bytes: bytes.length },
+        },
+        actor,
+      );
+      if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
       return serverAccessService.dbRestore(
         row.serverId,
         { engine: row.engine, db: db || null, auth: instanceAuth(row), bytes, confirm },

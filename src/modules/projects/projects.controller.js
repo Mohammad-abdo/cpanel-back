@@ -1,3 +1,5 @@
+import { respond } from '../platform/platform.http.js';
+
 export function createProjectsController(projectsService) {
   return {
     async list(req, res) {
@@ -79,7 +81,7 @@ export function createProjectsController(projectsService) {
     },
 
     async pm2Control(req, res) {
-      res.status(200).json({ data: await projectsService.pm2Control(req.validated.params.id, req.validated.body, req.user) });
+      respond(res, await projectsService.pm2Control(req.validated.params.id, req.validated.body, req.user));
     },
 
     async live(req, res) {

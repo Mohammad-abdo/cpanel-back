@@ -1,3 +1,5 @@
+import { respond } from '../platform/platform.http.js';
+
 export function createServerAccessController(svc) {
   const id = (req) => req.validated.params.id;
   return {
@@ -55,7 +57,7 @@ export function createServerAccessController(svc) {
       res.status(200).json({ data: await svc.pm2List(id(req), req.user) });
     },
     async pm2Control(req, res) {
-      res.status(200).json({ data: await svc.pm2Control(id(req), req.validated.body, req.user) });
+      respond(res, await svc.pm2Control(id(req), req.validated.body, req.user));
     },
     async ticket(req, res) {
       res.status(201).json({ data: await svc.createTicket(id(req), req.user) });
