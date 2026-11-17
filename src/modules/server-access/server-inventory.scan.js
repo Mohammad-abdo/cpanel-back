@@ -27,6 +27,9 @@ export const INVENTORY_SCRIPT = [
   "echo '##vhosts_grep'",
   'timeout 10 grep -RhoE "ServerName[[:space:]]+[^[:space:]]+" /etc/apache2 /etc/httpd 2>/dev/null | head -n 200 || true',
   'timeout 10 grep -RhoE "server_name[[:space:]]+[^;]+" /etc/nginx 2>/dev/null | head -n 200 || true',
+  // Caddyfile sites (TASK-047 style paths); read-only — no admin API required.
+  "echo '##vhosts_caddy'",
+  'for f in /etc/caddy/Caddyfile /etc/caddy/sites/*.caddy /etc/caddy/*.caddy; do if [ -e "$f" ]; then echo "FILE:$f"; grep -E "^[^#[:space:]].*\\{|root |reverse_proxy |redir " "$f" 2>/dev/null | head -n 80; fi; done',
   "echo '##mysql'",
   "mysql --batch --skip-column-names -e 'SHOW DATABASES' 2>/dev/null | head -n 200 || mysql --defaults-file=/etc/mysql/debian.cnf --batch --skip-column-names -e 'SHOW DATABASES' 2>/dev/null | head -n 200 || true",
   "echo '##postgres'",
@@ -332,6 +335,32 @@ export function parseInventory(text) {
     }
     const apache = /ServerName\s+(\S+)/i.exec(t);
     if (apache) pushDomain(apache[1], null, 'apache');
+  }
+
+  // Caddyfile: "host {" / "root * /path" / "reverse_proxy host:port"
+  let caddyFile = null;
+  for (const line of sec.vhosts_caddy ?? []) {
+    const t = line.trim();
+    if (t.startsWith('FILE:')) {
+      caddyFile = t.slice(5).trim();
+      continue;
+    }
+    const site = /^([a-z0-9.*-]+)\s*\{/i.exec(t);
+    if (site) {
+      const host = site[1].replace(/^\*\./, '');
+      if (host.includes('.')) pushDomain(host, caddyFile, 'caddy');
+      continue;
+    }
+    const root = /^root\s+\S*\s+(\/\S+)/i.exec(t) || /^root\s+(\/\S+)/i.exec(t);
+    if (root && domains.length) {
+      const last = domains[domains.length - 1];
+      if (last.confPath === caddyFile && last.webserver === 'caddy') last.root = root[1].replace(/,$/, '');
+    }
+    const proxy = /reverse_proxy\s+\S*?((\d{1,3}\.){3}\d{1,3}|localhost|127\.0\.0\.1):(\d+)/i.exec(t);
+    if (proxy && domains.length) {
+      const last = domains[domains.length - 1];
+      if (last.confPath === caddyFile && last.webserver === 'caddy') last.upstreamPort = Number(proxy[3]);
+    }
   }
 
   // Parse ##git blocks: DIR / REMOTE / BRANCH triples.

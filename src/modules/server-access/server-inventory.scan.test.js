@@ -31,6 +31,11 @@ FILE:/etc/nginx/sites-enabled/shop
   root /var/www/shop.example.com/public;
 ##vhosts_apache
 ##vhosts_grep
+##vhosts_caddy
+FILE:/etc/caddy/sites/api.example.com.caddy
+api.example.com {
+root * /var/www/api.example.com
+reverse_proxy 127.0.0.1:5000
 ##mysql
 shop_db
 mysql
@@ -55,7 +60,10 @@ BRANCH:
     expect(shop.issues).toEqual(expect.arrayContaining(['no-git']));
     expect(api.remoteUrl).toBe('https://github.com/acme/api');
     expect(api.issues).toEqual(expect.arrayContaining(['github']));
-    expect(out.domains.map((d) => d.name)).toContain('shop.example.com');
+    expect(api.domainName).toBe('api.example.com');
+    expect(api.upstreamPort).toBe(5000);
+    expect(out.domains.map((d) => d.name)).toEqual(expect.arrayContaining(['shop.example.com', 'api.example.com']));
+    expect(out.domains.find((d) => d.name === 'api.example.com')?.webserver).toBe('caddy');
     expect(out.databases[0].schemas).toEqual(['shop_db']);
   });
 

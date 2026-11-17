@@ -8,6 +8,8 @@ export const WEBSITES_SCRIPT = [
   'if command -v apache2ctl >/dev/null 2>&1; then apache2ctl -S 2>&1 | head -n 400; elif command -v apachectl >/dev/null 2>&1; then apachectl -S 2>&1 | head -n 400; else echo unavailable=apache; fi',
   "echo '##nginx'",
   'if command -v nginx >/dev/null 2>&1; then nginx -T 2>&1 | head -n 800; else echo unavailable=nginx; fi',
+  "echo '##caddy'",
+  'if command -v caddy >/dev/null 2>&1; then for f in /etc/caddy/Caddyfile /etc/caddy/sites/*.caddy /etc/caddy/*.caddy; do if [ -e "$f" ]; then echo "FILE:$f"; grep -E "^[^#[:space:]].*\\{|root |reverse_proxy |redir |tls " "$f" 2>/dev/null | head -n 80; fi; done; else echo unavailable=caddy; fi',
 ].join('\n');
 
 /** Pure: vhosts from `apachectl -S` / `apache2ctl -S`. */
@@ -75,7 +77,44 @@ function isRealHostname(name) {
   return !IGNORED.has(name) && /^[a-z0-9*][a-z0-9.*-]*\.[a-z0-9-]+$/i.test(name) && !/^\d+(\.\d+){3}$/.test(name);
 }
 
-/** Combine apache + nginx sections into a flat site list. */
+/** Pure: Caddyfile site blocks (`host {` + optional tls / reverse_proxy). */
+export function parseCaddySites(dump) {
+  const sites = [];
+  let file = null;
+  let current = null;
+  for (const raw of String(dump ?? '').split('\n')) {
+    const t = raw.trim();
+    if (t.startsWith('FILE:')) {
+      file = t.slice(5).trim();
+      current = null;
+      continue;
+    }
+    const site = /^([a-z0-9.*-]+)\s*\{/i.exec(t);
+    if (site) {
+      const hostname = site[1].replace(/^\*\./, '').toLowerCase();
+      current = {
+        hostname,
+        aliases: [],
+        ports: [80, 443],
+        https: true,
+        configFile: file,
+      };
+      sites.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (/^tls\s+off\b/i.test(t)) {
+      current.https = false;
+      current.ports = [80];
+    } else if (/^tls\b/i.test(t)) {
+      current.https = true;
+      if (!current.ports.includes(443)) current.ports.push(443);
+    }
+  }
+  return sites;
+}
+
+/** Combine apache + nginx + caddy sections into a flat site list. */
 export function parseWebsitesOutput(stdout) {
   const sec = {};
   let cur = null;
@@ -89,8 +128,10 @@ export function parseWebsitesOutput(stdout) {
   const sites = [];
   const apacheText = (sec.apache ?? []).join('\n');
   const nginxText = (sec.nginx ?? []).join('\n');
+  const caddyText = (sec.caddy ?? []).join('\n');
   const apacheUp = /unavailable=apache/.test(apacheText);
   const nginxUp = /unavailable=nginx/.test(nginxText);
+  const caddyUp = /unavailable=caddy/.test(caddyText);
 
   if (!apacheUp) {
     for (const v of parseApacheVhosts(apacheText)) {
@@ -119,6 +160,19 @@ export function parseWebsitesOutput(stdout) {
       });
     }
   }
+  if (!caddyUp) {
+    for (const s of parseCaddySites(caddyText)) {
+      if (!isRealHostname(s.hostname)) continue;
+      sites.push({
+        server: 'caddy',
+        hostname: s.hostname,
+        aliases: s.aliases.filter(isRealHostname),
+        ports: [...new Set(s.ports)].sort((a, b) => a - b),
+        https: s.https,
+        configFile: s.configFile,
+      });
+    }
+  }
 
   // Dedupe hostname+server
   const seen = new Set();
@@ -133,6 +187,7 @@ export function parseWebsitesOutput(stdout) {
   return {
     apache: !apacheUp,
     nginx: !nginxUp,
+    caddy: !caddyUp,
     sites: out,
   };
 }
