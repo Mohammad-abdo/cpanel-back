@@ -39,3 +39,4 @@ domainsRouter.post('/:id/dns', write, validate(domainIdParamsSchema, 'params'), 
 domainsRouter.post('/:id/caddy/preview', write, validate(domainIdParamsSchema, 'params'), validate(caddyBodySchema, 'body'), wrap(domainsController.previewCaddy));
 domainsRouter.post('/:id/caddy/apply', write, validate(domainIdParamsSchema, 'params'), validate(applyCaddyBodySchema, 'body'), wrap(domainsController.applyCaddy));
 domainsRouter.post('/:id/webserver/detect', write, validate(domainIdParamsSchema, 'params'), validate(detectWebserverBodySchema, 'body'), wrap(domainsController.detectWebserver));
+domainsRouter.post('/:id/tls-recheck', write, validate(domainIdParamsSchema, 'params'), wrap(domainsController.tlsRecheck));

@@ -18,7 +18,13 @@ export const COMMAND_ARGS = {
     content: z.string().max(1024 * 1024),
     expectedMtimeMs: z.number().int().min(0).optional(),
   }),
+  'file.move': strict({ from: absPath, to: absPath }),
+  'file.remove': strict({ path: absPath, recursive: z.boolean().optional() }),
   'ports.list': strict({}),
+  'tls.inspect': strict({
+    hostname: z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/),
+    port: z.number().int().min(1).max(65535).optional(),
+  }),
   'agent.info': strict({}),
   'deploy.step': strict({
     step: z.enum(['git_fetch', 'git_checkout', 'npm_ci', 'npm_script', 'prisma_migrate_deploy']),
@@ -49,6 +55,8 @@ export const COMMAND_ARGS = {
 /** Commands that need an explicit reason prompt in the UI (high/critical risk or mutating). */
 export const COMMAND_NEEDS_REASON = new Set([
   'file.write',
+  'file.move',
+  'file.remove',
   'deploy.step',
   'pm2.control',
   'pm2.logs',

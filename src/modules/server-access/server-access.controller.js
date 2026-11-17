@@ -65,6 +65,9 @@ export function createServerAccessController(svc) {
     async htop(req, res) {
       res.status(200).json({ data: await svc.htop(id(req), req.user) });
     },
+    async listeningPorts(req, res) {
+      res.status(200).json({ data: await svc.listeningPorts(id(req), req.user) });
+    },
     async ticket(req, res) {
       respond(res, await svc.createTicket(id(req), req.validated.body ?? {}, req.user), 201);
     },

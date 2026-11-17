@@ -142,6 +142,39 @@ export function cpuUsageFromSnaps(snap1, snap2) {
     .filter(Boolean);
 }
 
+/** Pure: parse `ss -lntuH` lines into { proto, port, address } rows (capped). */
+export function parseSsListening(text) {
+  const rows = [];
+  const seen = new Set();
+  for (const line of String(text ?? '').split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const parts = t.split(/\s+/);
+    // Common: Netid State Recv-Q Send-Q Local Address:Port Peer...
+    // Or: LISTEN 0 511 *:443 *:*
+    let proto = 'tcp';
+    let local = '';
+    if (/^(tcp|udp|tcp6|udp6)$/i.test(parts[0] ?? '')) {
+      proto = parts[0].toLowerCase().replace(/6$/, '');
+      local = parts[4] ?? '';
+    } else if (/^LISTEN$/i.test(parts[0] ?? '') || /^UNCONN$/i.test(parts[0] ?? '')) {
+      proto = /^UNCONN$/i.test(parts[0]) ? 'udp' : 'tcp';
+      local = parts[3] ?? '';
+    } else continue;
+    const m = /:(\d+)$/.exec(local.replace(/]$/, ''));
+    if (!m) continue;
+    const port = Number(m[1]);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+    const address = local.slice(0, Math.max(0, local.lastIndexOf(':'))) || '*';
+    const key = `${proto}:${port}:${address}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({ proto, port, address: address.slice(0, 64) });
+    if (rows.length >= 300) break;
+  }
+  return rows.sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto));
+}
+
 /** Parses HTOP_SCRIPT stdout into a structured live process board. */
 export function parseHtopSnapshot(text) {
   const sec = {};
@@ -717,6 +750,22 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           const res = await execCommand(client, HTOP_SCRIPT, { maxBytes: 768 * 1024, timeoutMs: 45_000 });
           if (res.timedOut) throw new AppError(504, 'SSH_HTOP_TIMEOUT', 'Process snapshot over SSH timed out');
           return { ...parseHtopSnapshot(res.stdout), collectedAt: now().toISOString() };
+        } finally {
+          client.end();
+        }
+      });
+    },
+
+    /** Live listening sockets via `ss -lntuH` (Owner MFA). Read-only. */
+    async listeningPorts(serverId, actor) {
+      requireOwner(actor);
+      const cred = await loadCredential(serverId);
+      return withSshLock(serverId, async () => {
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execCommand(client, "ss -lntuH 2>/dev/null | head -n 400", { maxBytes: 256 * 1024, timeoutMs: 20_000 });
+          if (res.timedOut) throw new AppError(504, 'SSH_PORTS_TIMEOUT', 'Listening ports probe over SSH timed out');
+          return { listening: parseSsListening(res.stdout), collectedAt: now().toISOString() };
         } finally {
           client.end();
         }

@@ -35,5 +35,8 @@ export function createDomainsController(domainsService, { serverAccess = null } 
     async writeConf(req, res) {
       res.status(200).json({ data: await domainsService.writeConf(req.validated.params.id, req.validated.body, req.user, serverAccess) });
     },
+    async tlsRecheck(req, res) {
+      res.status(200).json({ data: await domainsService.tlsRecheck(req.validated.params.id, req.user) });
+    },
   };
 }

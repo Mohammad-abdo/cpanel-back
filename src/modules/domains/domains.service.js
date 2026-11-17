@@ -3,6 +3,7 @@ import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { sha256 } from '../platform/platform.crypto.js';
+import { probeTls } from '../certificates/certificates.probe.js';
 import { CADDY_APPLY_SCRIPT, DETECT_WEBSERVER_SCRIPT, isCaddyEnabled, lintCaddySite, parseWebserverProbe, renderCaddySite } from './domains.proxy.js';
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
@@ -259,6 +260,58 @@ export function createDomainsService({
       }
       await audit({ actorId: actor.id, action: 'dns.change', resourceType: 'domain', resourceId: id, environmentId: input.environmentId, result: 'success', before: existing ? { value: existing.valueSummary } : undefined, after: { op: input.op, type: input.type, name: input.name } });
       return { record: saved, op: input.op, simulated: adapters.dns.simulated ?? Boolean(adapters.simulated) };
+    },
+
+    /**
+     * On-demand TLS recheck (read-only handshake from the control plane). Updates the newest
+     * certificate row when one exists. Does not issue or renew certificates.
+     */
+    async tlsRecheck(id, actor, { allowPrivate = false } = {}) {
+      if (!actor?.isOwner) throw new AppError(403, 'OWNER_ONLY', 'Only the Owner can recheck TLS');
+      const domain = await load(id);
+      const host = String(domain.name).replace(/^\*\./, '').toLowerCase();
+      const res = await probeTls(host, { allowPrivate });
+      let certificate = null;
+      if (res.ok) {
+        const cert = domain.certificates?.[0]
+          ?? (await prisma.sslCertificate.findFirst({ where: { domainId: id }, orderBy: { createdAt: 'desc' } }));
+        if (cert) {
+          const status = res.trusted ? (res.validTo <= now() ? 'expired' : 'active') : 'invalid';
+          certificate = await prisma.sslCertificate.update({
+            where: { id: cert.id },
+            data: {
+              expiresAt: res.validTo,
+              status,
+              lastError: res.trusted ? null : String(res.authorizationError ?? 'untrusted').slice(0, 190),
+            },
+          });
+        }
+      }
+      await audit({
+        actorId: actor.id,
+        action: 'domain.tls.recheck',
+        resourceType: 'domain',
+        resourceId: id,
+        result: res.ok ? 'success' : 'failure',
+        metadata: { hostname: host, ok: res.ok, trusted: res.trusted ?? false, error: res.error ?? null },
+      });
+      return {
+        hostname: host,
+        probe: res.ok
+          ? {
+              ok: true,
+              trusted: res.trusted,
+              authorizationError: res.authorizationError,
+              validFrom: res.validFrom,
+              validTo: res.validTo,
+              daysLeft: res.daysLeft,
+              issuer: res.issuer,
+              subject: res.subject,
+              protocol: res.protocol,
+            }
+          : { ok: false, error: res.error },
+        certificate,
+      };
     },
   };
 }
