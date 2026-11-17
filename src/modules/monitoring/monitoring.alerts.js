@@ -2,6 +2,7 @@ import { PERMISSIONS } from '../../common/permission-catalog.js';
 import { AppError } from '../../common/errors/app-error.js';
 import { createRbacService } from '../rbac/rbac.service.js';
 import { notifyOwners } from '../notifications/notifications.service.js';
+import { realtime } from '../agent-gateway/agent-gateway.realtime.js';
 
 const OPEN = ['firing', 'acknowledged', 'escalated'];
 
@@ -24,6 +25,24 @@ export function createAlertsService({ prisma, now = () => new Date(), auditServi
       environmentId,
     });
     if (!ok) throw new AppError(403, 'FORBIDDEN', 'No access for this project and environment');
+  }
+
+  async function publishAlert(rule, alert, event = 'alert.opened') {
+    try {
+      const projectId = rule?.scopeType === 'project' ? rule.scopeId : null;
+      if (!projectId) return;
+      const project = await prisma.project.findUnique({ where: { id: projectId }, select: { serverId: true } });
+      if (!project?.serverId) return;
+      realtime.publish(`alerts:${project.serverId}`, event, {
+        alertId: alert.id,
+        projectId,
+        severity: alert.severity ?? rule.severity,
+        status: alert.status,
+        ruleId: rule.id,
+      });
+    } catch {
+      /* realtime is best effort */
+    }
   }
 
   async function transition(alert, rule, toStatus, { actorId = null, note } = {}) {
@@ -130,6 +149,7 @@ export function createAlertsService({ prisma, now = () => new Date(), auditServi
             { type: 'alert.opened', severity: rule.severity, title: `Alert firing (${rule.severity})`, resourceType: 'alert', resourceId: alert.id },
             { prisma },
           );
+          await publishAlert(rule, alert, 'alert.opened');
           await audit({
             action: 'alert.firing',
             resourceType: 'project',
@@ -142,6 +162,7 @@ export function createAlertsService({ prisma, now = () => new Date(), auditServi
         }
         if (existing.status === 'resolved') {
           await transition(existing, rule, 'firing', { note: 'reopened' });
+          await publishAlert(rule, { ...existing, status: 'firing' }, 'alert.opened');
           return { action: 'reopened', alert: existing, detail: result.detail };
         }
         return { action: 'deduplicated', alert: existing, detail: result.detail };

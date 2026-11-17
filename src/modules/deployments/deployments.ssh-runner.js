@@ -34,6 +34,7 @@ import {
   validateSha,
 } from './deployments.commands.js';
 import { createSimulatedHealthChecker, createSimulatedRunner } from './deployments.executor.js';
+import { realtime } from '../agent-gateway/agent-gateway.realtime.js';
 
 const UUID = /^[0-9a-f-]{36}$/i;
 const MAX_LOG_LINES = 200;
@@ -68,6 +69,16 @@ export function createPrismaLogSink({ prisma, now = () => new Date() }) {
       });
     } catch {
       /* log storage must never fail a deployment */
+    }
+    // Best-effort push to Socket.IO /rt room deployment:<id> (consumers keep polling as fallback).
+    if (UUID.test(deployment?.id)) {
+      realtime.publish(`deployment:${deployment.id}`, 'deployment.log', {
+        deploymentId: deployment.id,
+        phase,
+        severity,
+        lines: clean,
+        at: at.toISOString?.() ?? String(at),
+      });
     }
   };
 }
