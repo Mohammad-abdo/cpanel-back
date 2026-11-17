@@ -21,7 +21,7 @@ const wrap = (fn) => (req, res, next) => fn(req, res).catch(next);
 const ip = (req) => req.ip || req.socket?.remoteAddress || 'unknown';
 
 /** Per-process limits (see rate-limit.js). GitHub delivers bursts, so its ceiling is higher than the hook ceiling. */
-export const githubLimiter = rateLimit({ windowMs: 60_000, max: 120, keyFn: (req) => `gh:${ip(req)}` });
+export const githubLimiters = [ rateLimit({ windowMs: 60_000, max: 120, keyFn: (req) => `gh:${ip(req)}` })];
 export const hookLimiters = [
   rateLimit({ windowMs: 60_000, max: 30, keyFn: (req) => `hook:ip:${ip(req)}` }),
   rateLimit({ windowMs: 60_000, max: 6, keyFn: (req) => `hook:tok:${hashHookToken(req.params.token ?? '')}` }),
@@ -32,7 +32,7 @@ const jsonBody = express.json({ limit: '4kb' });
 
 /** Public, unauthenticated: mounted at /webhooks. Authentication is the HMAC signature or the hook token. */
 export const webhooksRouter = Router();
-webhooksRouter.post('/github', githubLimiter, rawBody, wrap(c.github));
+webhooksRouter.post('/github', ...githubLimiters, rawBody, wrap(c.github));
 webhooksRouter.post('/deploy/:token', ...hookLimiters, validate(hookTokenParamsSchema, 'params'), jsonBody, validate(triggerHookBodySchema, 'body'), wrap(c.trigger));
 
 /** Owner-managed: mounted at /projects. */

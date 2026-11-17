@@ -36,7 +36,8 @@ import { mailboxesRouter } from './modules/mailboxes/mailboxes.routes.js';
 import { mailOverviewRouter } from './modules/mail-overview/mail-overview.routes.js';
 import { cronRouter } from './modules/cron/cron.routes.js';
 import { serverCleanupRouter } from './modules/server-cleanup/server-cleanup.routes.js';
-import { webhooksRouter, deploySettingsRouter } from './modules/webhooks/webhooks.routes.js';
+import { webhooksRouter } from './modules/webhooks/webhooks.routes.js';
+import { deploySettingsRouter } from './modules/webhooks/webhooks.routes.js';
 import { alertChannelsRouter } from './modules/alert-channels/alert-channels.routes.js';
 
 export const apiRouter = Router();
