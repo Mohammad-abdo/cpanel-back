@@ -50,7 +50,12 @@ export function createServerCleanupService({ prisma, auditService = null, platfo
       const res = await remote(serverId, previewScript(tasks), 90_000);
       const parsed = parseCleanupOutput(res.stdout);
       const rows = tasks.map((t) => ({ task: t, label: CLEANUP_TASKS[t].label, risk: CLEANUP_TASKS[t].risk, bytes: parsed[t]?.bytes ?? null, items: parsed[t]?.items ?? [], unavailable: parsed[t]?.unavailable ?? null }));
-      return { tasks: rows, totalBytes: rows.reduce((n, r) => n + (r.bytes ?? 0), 0), dryRun: true };
+      return {
+        tasks: rows,
+        totalBytes: rows.reduce((n, r) => n + (r.bytes ?? 0), 0),
+        dryRun: true,
+        host: parsed.__host ?? { disk: null, memory: null },
+      };
     },
 
     async apply(serverId, { tasks, reason, rollbackNote, approvalId }, actor) {
