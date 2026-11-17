@@ -154,6 +154,7 @@ export function createRestoresService({
       const items = [];
       for (const a of artifacts) items.push({ kind: a.kind, bytes: (await backups.verifyArtifactBytes(a)).plain });
       const dbOnly = items.length === 1 && items[0].kind === 'db';
+      if (dbOnly && live()) return Boolean((await execRestoreDb({ policy, plain: items[0].bytes, actor, mode: 'inplace' })).restored);
       if (dbOnly) {
         const live = await liveRestoreDb(policy, items[0].bytes, actor);
         if (live) return Boolean(live.restored);
@@ -212,7 +213,16 @@ export function createRestoresService({
     };
   }
 
-  async function applyRestore({ mode, policy, kind, plain, actor }) {
+  async function applyRestore({ mode, policy, kind, plain, actor, runId }) {
+    if (live()) {
+      if (kind === 'db') return execRestoreDb({ policy, plain, actor, mode, runId });
+      if (kind === 'config' && mode === 'inplace') {
+        const panel = await panelRestoreConfig(policy, plain, actor);
+        if (panel) return panel;
+      }
+      if (kind === 'config') return { restored: true, checksums: { config: sha256(plain) }, simulated: false, source: 'verify-only', live: null };
+      throw new AppError(422, 'RESTORE_KIND_UNSUPPORTED', 'Restoring this artifact kind is not implemented for the SSH executor (NOT_RUN)');
+    }
     // Isolated trial never writes the live server database or panel env store.
     if (mode === 'inplace' && kind === 'db' && actor?.isOwner) {
       const live = await liveRestoreDb(policy, plain, actor);
@@ -334,6 +344,9 @@ export function createRestoresService({
       let safetyBackupRunId = null;
       let usedLive = false;
       let usedPanel = false;
+      let usedExec = false;
+      let isolatedDb = null;
+      const startedAt = now();
       const fail = async (code, message, extra = {}) => {
         if (RESTORE_TRANSITIONS[state.status]?.includes('failed')) await move(state, 'failed');
         await audit({
@@ -362,7 +375,10 @@ export function createRestoresService({
         }
         state = await move(state, 'restoring');
         const { plain } = await backups.verifyArtifactBytes(artifact);
-        const result = await applyRestore({ mode, policy, kind: artifact.kind, plain, actor });
+        // In-place is never allowed without a completed pre-restore safety backup (defence in depth).
+        if (mode === 'inplace' && !safetyBackupRunId) return await fail('SAFETY_BACKUP_REQUIRED', 'In-place restore requires a pre-restore safety backup');
+        const result = await applyRestore({ mode, policy, kind: artifact.kind, plain, actor, runId: id });
+        usedExec = result.source === 'ssh-exec';
         usedLive = result.source === 'ssh-live';
         usedPanel = result.source === 'panel-env';
         if (!result.restored || result.checksums?.[artifact.kind] !== sha256(plain)) {
@@ -370,7 +386,10 @@ export function createRestoresService({
         }
         state = await move(state, 'health_check');
         // Panel config restore is verified by checksum match above; treat as healthy without adapter.
-        const health = usedPanel
+        isolatedDb = result.isolatedDb ?? null;
+        const health = usedExec
+          ? { healthy: result.tables !== 0, source: 'ssh-exec' } // 0 tables = empty restore; -1 = engine cannot count (checksum only)
+          : usedPanel || result.source === 'verify-only'
           ? { healthy: true, source: 'panel-env' }
           : ((usedLive ? await liveHealth(policy, actor, result.live) : null) ??
             (await adapters.backupEngine.health({ mode, projectId: policy.projectId })));
