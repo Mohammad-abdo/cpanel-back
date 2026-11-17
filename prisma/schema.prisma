@@ -1478,3 +1478,22 @@ model PreviewEnvironment {
   @@unique([serverId, port])
   @@index([status, expiresAt])
 }
+
+// ---------------------------------------------------------------------------
+// TASK-044 extension — platform GitHub App credentials (single-row control plane).
+// ---------------------------------------------------------------------------
+
+/// Owner-managed GitHub App installation credentials. Private key and webhook secret are encrypted at rest and never returned.
+model GitHubAppConfig {
+  id                String   @id @default(uuid())
+  appId             Int?
+  clientId          String?  @db.VarChar(64)
+  slug              String?  @db.VarChar(40)
+  installationId    String?  @db.VarChar(32)
+  privateKeyEnc     Bytes?   @db.Blob
+  webhookSecretEnc  Bytes?   @db.Blob
+  status            String   @default("unconfigured") @db.VarChar(20)
+  metaJson          Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}

@@ -27,6 +27,9 @@ export function createServerAccessController(svc) {
     async write(req, res) {
       res.status(200).json({ data: await svc.write(id(req), req.validated.body, req.user) });
     },
+    async search(req, res) {
+      res.status(200).json({ data: await svc.search(id(req), req.validated.query, req.user) });
+    },
     async upload(req, res) {
       const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       res.status(201).json({ data: await svc.upload(id(req), { path: req.validated.query.path, bytes }, req.user) });

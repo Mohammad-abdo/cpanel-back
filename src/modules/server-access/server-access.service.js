@@ -499,26 +499,83 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           if (st.size > MAX_EDIT_BYTES) return { path: p, size: st.size, tooLarge: true, content: null };
           const buf = await call((cb) => sftp.readFile(p, cb));
           const binary = buf.includes(0);
-          return { path: p, size: buf.length, binary, content: binary ? null : buf.toString('utf8'), sha256: sha(buf) };
+          return {
+            path: p,
+            size: buf.length,
+            binary,
+            content: binary ? null : buf.toString('utf8'),
+            sha256: sha(buf),
+            mtimeMs: Number(st.mtime) * 1000,
+          };
         } catch (err) {
           throw sftpError(err, p);
         }
       });
     },
 
-    async write(serverId, { path: rawPath, content }, actor) {
+    async write(serverId, { path: rawPath, content, expectedMtimeMs }, actor) {
       requireOwner(actor);
       const buf = Buffer.from(content, 'utf8');
       if (buf.length > MAX_EDIT_BYTES) throw new AppError(413, 'FILE_TOO_LARGE', 'Files over 1 MB cannot be edited in the browser');
       return withSftp(serverId, async (sftp, home) => {
         const p = normalizeRemotePath(rawPath, home);
         try {
+          if (expectedMtimeMs != null) {
+            const st = await call((cb) => sftp.stat(p, cb)).catch((err) => {
+              if (err?.code === 2 /* ENOENT */) return null;
+              throw err;
+            });
+            if (st) {
+              const remoteMs = Number(st.mtime) * 1000;
+              if (remoteMs !== Number(expectedMtimeMs)) {
+                throw new AppError(
+                  409,
+                  'FILE_MTIME_CONFLICT',
+                  `The file changed on the server since you opened it (expected mtime ${expectedMtimeMs}, remote ${remoteMs})`,
+                );
+              }
+            }
+          }
           await call((cb) => sftp.writeFile(p, buf, cb));
         } catch (err) {
+          if (err instanceof AppError) throw err;
           throw sftpError(err, p);
         }
         await audit({ actorId: actor.id, action: 'server.file.write', resourceId: serverId, result: 'success', after: { path: p, size: buf.length, sha256: sha(buf) } });
         return { path: p, size: buf.length };
+      });
+    },
+
+    /**
+     * Filename search under a directory (find -name). Pattern is literal-escaped; depth and count capped.
+     * Ported idea from vercel-clone files search — runs over SSH, not a free-form shell from the client.
+     */
+    async search(serverId, { path: rawPath, q, limit }, actor) {
+      requireOwner(actor);
+      const needle = String(q || '').trim();
+      if (!needle) throw new AppError(400, 'SEARCH_QUERY_REQUIRED', 'Search query is required');
+      if (/[\0\n\r]/.test(needle)) throw new AppError(400, 'SEARCH_QUERY_INVALID', 'Invalid search query');
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const sftp = await openSftp(client);
+          const home = await call((cb) => sftp.realpath('.', cb)).catch(() => '/');
+          const root = normalizeRemotePath(rawPath ?? '', home);
+          const lit = needle.replace(/([\\*?[\]{}])/g, '\\$1').replace(/'/g, `'\\''`);
+          const rootQ = root.replace(/'/g, `'\\''`);
+          const cmd = `find '${rootQ}' -maxdepth 6 \\( -type f -o -type d \\) -name '*${lit}*' 2>/dev/null | head -n ${Number(limit) || 50}`;
+          const res = await execCommand(client, cmd, { maxBytes: 256 * 1024, timeoutMs: 45_000 });
+          const paths = String(res.stdout || '')
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .slice(0, Number(limit) || 50)
+            .map((p) => ({ path: p, name: posix.basename(p) }));
+          return { path: root, q: needle, items: paths };
+        } finally {
+          client.end();
+        }
       });
     },
 

@@ -41,6 +41,7 @@ import { deploySettingsRouter } from './modules/webhooks/webhooks.routes.js';
 import { alertChannelsRouter } from './modules/alert-channels/alert-channels.routes.js';
 import { previewsRouter } from './modules/previews/previews.routes.js';
 import { rootDomainsRouter } from './modules/root-domains/root-domains.routes.js';
+import { githubRouter } from './modules/github/github.routes.js';
 
 export const apiRouter = Router();
 
@@ -71,6 +72,7 @@ apiRouter.use('/notifications', notificationsRouter);
 apiRouter.use('/deployments', deploymentsRouter);
 apiRouter.use('/backups', backupsRouter);
 apiRouter.use('/root-domains', rootDomainsRouter);
+apiRouter.use('/github', githubRouter);
 apiRouter.use('/domains', domainsRouter);
 apiRouter.use('/domains', mailDomainRouter);
 apiRouter.use('/mailboxes', mailboxesRouter);

@@ -33,9 +33,23 @@ export const deleteQuerySchema = z
   .object({ path: remotePath, recursive: z.enum(['true', 'false']).optional().transform((v) => v === 'true') })
   .strict();
 
-export const writeBodySchema = z.object({ path: remotePath, content: z.string().max(1024 * 1024) }).strict();
+export const writeBodySchema = z
+  .object({
+    path: remotePath,
+    content: z.string().max(1024 * 1024),
+    /** When set, fail with 409 FILE_MTIME_CONFLICT if the remote mtime (ms) differs. */
+    expectedMtimeMs: z.number().int().nonnegative().optional(),
+  })
+  .strict();
 export const mkdirBodySchema = z.object({ path: remotePath }).strict();
 export const renameBodySchema = z.object({ from: remotePath, to: remotePath }).strict();
+export const searchQuerySchema = z
+  .object({
+    path: z.string().max(4096).optional(),
+    q: z.string().trim().min(1).max(120),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+  })
+  .strict();
 
 export const serviceBodySchema = z
   .object({

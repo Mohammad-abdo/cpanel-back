@@ -19,6 +19,7 @@ import {
   mkdirBodySchema,
   pathQuerySchema,
   renameBodySchema,
+  searchQuerySchema,
   serverIdParamsSchema,
   serviceBodySchema,
   pm2BodySchema,
@@ -63,6 +64,7 @@ serverAccessRouter.get('/:id/ssh/db/:engine/rows', owner, dbParams, validate(dbT
 serverAccessRouter.post('/:id/ssh/db/:engine/query', owner, dbParams, validate(dbQueryBodySchema, 'body'), wrap(c.dbQuery));
 
 serverAccessRouter.get('/:id/files', owner, params, validate(listQuerySchema, 'query'), wrap(c.list));
+serverAccessRouter.get('/:id/files/search', owner, params, validate(searchQuerySchema, 'query'), wrap(c.search));
 serverAccessRouter.get('/:id/files/content', owner, params, validate(pathQuerySchema, 'query'), wrap(c.read));
 serverAccessRouter.put('/:id/files/content', editJson, owner, params, validate(writeBodySchema, 'body'), wrap(c.write));
 serverAccessRouter.post('/:id/files/upload', rawUpload, owner, params, validate(pathQuerySchema, 'query'), wrap(c.upload));
