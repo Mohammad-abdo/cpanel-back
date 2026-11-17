@@ -48,7 +48,7 @@ export const pm2BodySchema = z
   .object({
     name: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/, 'Invalid PM2 process name'),
     action: z.enum(['start', 'stop', 'restart', 'reload', 'delete', 'logs', 'describe']),
-    /** stop/restart/reload are High risk: reason + rollbackNote request approval, approvalId replays it. */
+    /** stop/restart/reload/delete are High risk: reason + rollbackNote request approval, approvalId replays it. */
     reason: z.string().min(5).max(500).optional(),
     rollbackNote: z.string().min(5).max(500).optional(),
     approvalId: z.string().uuid().optional(),
