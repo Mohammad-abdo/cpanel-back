@@ -335,6 +335,32 @@ describe('socket hub', () => {
     expect((await ack('anything')).error).toBe('BAD_ROOM');
     expect(sock.joined).toEqual([`server:${SID}`]);
   });
+  it('relays pm2:log and scopes pm2:logs:subscribe', async () => {
+    const { io, hub } = build();
+    const agentNs = io.handlers['/agents'];
+    const agentSock = fakeSocket({ agentId: AID, key: 'goodkey', version: '0.1.0' });
+    const emitted = [];
+    agentSock.emit = (e, p) => emitted.push([e, p]);
+    await agentNs.mw(agentSock, vi.fn());
+    agentNs.onConn(agentSock);
+    expect(hub.isConnected(AID)).toBe(true);
+
+    const rt = io.handlers['/rt'];
+    const browser = fakeSocket({ token: 'tok' });
+    await rt.mw(browser, vi.fn());
+    rt.onConn(browser);
+    const sub = (p) => new Promise((r) => browser.emitEvent('pm2:logs:subscribe', p, r));
+    expect(await sub({ serverId: SID, appName: 'web' })).toMatchObject({ ok: true, live: true });
+    expect(emitted.some(([e, p]) => e === 'pm2:logs:start' && p.appName === 'web')).toBe(true);
+    expect((await sub({ serverId: '33333333-3333-4333-8333-333333333333', appName: 'web' })).ok).toBe(false);
+    expect((await sub({ serverId: SID, appName: '../etc' })).error).toBe('BAD_ROOM');
+
+    agentSock.emitEvent('pm2:log', { appName: 'web', stream: 'stdout', line: 'hello' });
+    expect(rt.rooms.some(([room, ev, p]) => room === `pm2:${SID}:web` && ev === 'pm2.log' && p.line === 'hello')).toBe(true);
+
+    browser.emitEvent('pm2:logs:unsubscribe', { serverId: SID, appName: 'web' });
+    expect(emitted.some(([e, p]) => e === 'pm2:logs:stop' && p.appName === 'web')).toBe(true);
+  });
   it('degrades gracefully when socket.io is absent', async () => {
     const hub = await attachAgentGateway({}, {}, { importer: async () => { throw new Error('not found'); }, log: () => {} });
     expect(hub.available).toBe(false);
