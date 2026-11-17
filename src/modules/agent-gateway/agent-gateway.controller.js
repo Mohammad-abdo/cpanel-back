@@ -1,5 +1,8 @@
 export function createAgentGatewayController(service) {
   return {
+    async fleet(req, res) {
+      res.json({ data: await service.fleetOverview(req.user) });
+    },
     async status(req, res) {
       res.json({ data: await service.status(req.validated.params.id, req.user) });
     },

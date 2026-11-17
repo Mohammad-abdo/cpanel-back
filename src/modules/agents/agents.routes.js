@@ -7,9 +7,12 @@ import { createAgentsService } from './agents.service.js';
 import { prisma } from '../../config/prisma.js';
 import { createAuditService } from '../audit/audit.service.js';
 import { enrollLimiters } from '../../common/middleware/rate-limit.js';
+import { createAgentGatewayController } from '../agent-gateway/agent-gateway.controller.js';
+import { getAgentGatewayService } from '../agent-gateway/agent-gateway.wiring.js';
 
 const agentsService = createAgentsService({ prisma, auditService: createAuditService({ prisma }) });
 const agentsController = createAgentsController(agentsService);
+const gatewayFleet = () => createAgentGatewayController(getAgentGatewayService());
 
 function requireAgent(req, _res, next) {
   agentsService
@@ -22,6 +25,11 @@ function requireAgent(req, _res, next) {
 }
 
 export const agentsRouter = Router();
+
+/** Fleet agent versions / connection (Owner MFA). Mirrors vercel-clone GET /agents/info. */
+agentsRouter.get('/info', requireSession({ requireMfa: true }), (req, res, next) => {
+  gatewayFleet().fleet(req, res).catch(next);
+});
 
 agentsRouter.post('/enroll', ...enrollLimiters, validate(enrollBodySchema, 'body'), (req, res, next) => {
   agentsController.enroll(req, res).catch(next);

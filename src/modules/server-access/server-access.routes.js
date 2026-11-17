@@ -23,6 +23,7 @@ import {
   serverIdParamsSchema,
   serviceBodySchema,
   pm2BodySchema,
+  pm2LogsQuerySchema,
   terminalTicketBodySchema,
   writeBodySchema,
   inventoryImportBodySchema,
@@ -53,6 +54,7 @@ serverAccessRouter.post('/:id/ssh/test', owner, params, wrap(c.test));
 serverAccessRouter.get('/:id/ssh/info', owner, params, wrap(c.info));
 serverAccessRouter.post('/:id/ssh/service', owner, params, validate(serviceBodySchema, 'body'), wrap(c.service));
 serverAccessRouter.get('/:id/ssh/pm2', owner, params, wrap(c.pm2List));
+serverAccessRouter.get('/:id/ssh/pm2/logs', owner, params, validate(pm2LogsQuerySchema, 'query'), wrap(c.pm2Logs));
 serverAccessRouter.post('/:id/ssh/pm2', owner, params, validate(pm2BodySchema, 'body'), wrap(c.pm2Control));
 serverAccessRouter.get('/:id/ssh/htop', owner, params, wrap(c.htop));
 serverAccessRouter.get('/:id/ssh/ports', owner, params, wrap(c.listeningPorts));

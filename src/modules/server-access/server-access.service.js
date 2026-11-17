@@ -789,6 +789,35 @@ export function createServerAccessService({ prisma, connector, auditService = nu
       });
     },
 
+    /** Read-only PM2 log snapshot (Owner MFA). Safe to poll for a follow stream. */
+    async pm2Logs(serverId, { name, lines = 120 }, actor) {
+      requireOwner(actor);
+      assertSafePm2Name(name);
+      const lim = Math.min(Math.max(Number(lines) || 120, 20), 500);
+      return withSshLock(serverId, async () => {
+        const cred = await loadCredential(serverId);
+        const { client } = await connectWith(cred);
+        try {
+          const res = await execScript(client, pm2ActionScript('logs'), {
+            args: [name, String(lim)],
+            maxBytes: 384 * 1024,
+            timeoutMs: 60_000,
+          });
+          if (res.timedOut) throw new AppError(504, 'PM2_TIMEOUT', 'PM2 logs timed out over SSH');
+          const parsed = parsePm2ActionOutput(res.stdout);
+          return {
+            name,
+            action: 'logs',
+            lines: lim,
+            output: parsed.output,
+            collectedAt: parsed.collectedAt ?? now().toISOString(),
+          };
+        } finally {
+          client.end();
+        }
+      });
+    },
+
     /** Control one PM2 process: start|stop|restart|reload|delete|logs|describe. */
     async pm2Control(serverId, { name, action, reason, rollbackNote, approvalId }, actor) {
       requireOwner(actor);
@@ -817,7 +846,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
         const { client } = await connectWith(cred);
         try {
           const res = await execScript(client, pm2ActionScript(action), {
-            args: [name],
+            args: action === 'logs' ? [name, '120'] : [name],
             maxBytes: 256 * 1024,
             timeoutMs: 90_000,
           });

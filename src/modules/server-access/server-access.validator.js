@@ -69,6 +69,14 @@ export const pm2BodySchema = z
   })
   .strict();
 
+/** Read-only PM2 log snapshot (pollable stream). */
+export const pm2LogsQuerySchema = z
+  .object({
+    name: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/, 'Invalid PM2 process name'),
+    lines: z.coerce.number().int().min(20).max(500).default(120),
+  })
+  .strict();
+
 /** Interactive SSH terminal ticket (Critical). Body may be empty on first request; reason defaults in the service. */
 export const terminalTicketBodySchema = z.preprocess(
   (b) => b ?? {},

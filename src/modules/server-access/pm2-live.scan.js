@@ -76,10 +76,16 @@ export function pm2ActionScript(action) {
     return `
 ${PM2_ENV_SETUP}
 NAME="$1"
+LINES="$2"
+case "$LINES" in ''|*[!0-9]*) LINES=120 ;; esac
+if [ "$LINES" -lt 20 ]; then LINES=20; fi
+if [ "$LINES" -gt 500 ]; then LINES=500; fi
+TAIL=$((LINES + 40))
 echo '##meta'
 date -u +%Y-%m-%dT%H:%M:%SZ
+echo "lines=$LINES"
 echo '##out'
-pm2_exec logs "$NAME" --nostream --lines 100 2>&1 | tail -n 160
+pm2_exec logs "$NAME" --nostream --lines "$LINES" 2>&1 | tail -n "$TAIL"
 `.trim();
   }
   if (action === 'describe') {

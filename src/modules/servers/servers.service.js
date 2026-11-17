@@ -7,7 +7,17 @@ const sha = (v) => createHash('sha256').update(v).digest('hex');
 const ENROLL_TTL_MS = 60 * 60 * 1000;
 
 // Never expose agent credential material (certFingerprint) through the API.
-const AGENT_PUBLIC = { select: { id: true, agentPublicId: true, lastSeenAt: true, revokedAt: true, createdAt: true } };
+const AGENT_PUBLIC = {
+  select: {
+    id: true,
+    agentPublicId: true,
+    agentVersion: true,
+    keyGeneration: true,
+    lastSeenAt: true,
+    revokedAt: true,
+    createdAt: true,
+  },
+};
 /** SSH login summary for the Owner (never the password). */
 const SSH_PUBLIC = { select: { host: true, port: true, username: true, lastConnectedAt: true } };
 const sshFor = (actor) => (actor?.isOwner ? { credential: SSH_PUBLIC } : {});

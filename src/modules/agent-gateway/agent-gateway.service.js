@@ -177,6 +177,53 @@ export function createAgentGatewayService({ prisma, auditService = null, platfor
       };
     },
 
+    /** Fleet view: every server’s agent version + live socket presence (vercel-clone agents/info parity). */
+    async fleetOverview(actor) {
+      if (!actor?.isOwner) throw OWNER_ONLY();
+      const controlConfigured = Boolean(env.AGENT_CONTROL_SECRET && env.AGENT_CONTROL_SECRET.length >= 32);
+      const servers = await prisma.server.findMany({
+        where: { archivedAt: null },
+        orderBy: { alias: 'asc' },
+        take: 200,
+        include: {
+          agent: {
+            select: {
+              agentPublicId: true,
+              agentVersion: true,
+              lastSeenAt: true,
+              revokedAt: true,
+              keyGeneration: true,
+              terminalEnabledAt: true,
+            },
+          },
+        },
+      });
+      const rows = servers.map((s) => {
+        const agent = s.agent && !s.agent.revokedAt ? s.agent : null;
+        return {
+          serverId: s.id,
+          alias: s.alias,
+          hostname: s.hostname,
+          enrolled: Boolean(agent),
+          connected: agent ? Boolean(hub?.isConnected(agent.agentPublicId)) : false,
+          version: agent?.agentVersion ?? null,
+          lastSeenAt: agent?.lastSeenAt ?? null,
+          keyGeneration: agent?.keyGeneration ?? null,
+          terminalEnabled: Boolean(agent?.terminalEnabledAt),
+        };
+      });
+      return {
+        socketAvailable: Boolean(hub?.available),
+        controlConfigured,
+        totals: {
+          servers: rows.length,
+          enrolled: rows.filter((r) => r.enrolled).length,
+          connected: rows.filter((r) => r.connected).length,
+        },
+        servers: rows,
+      };
+    },
+
     async listCommands(serverId, { status, limit = 25 } = {}, actor) {
       if (!actor?.isOwner) throw OWNER_ONLY();
       return guard(() => prisma.agentCommand.findMany({ where: { serverId, ...(status ? { status } : {}) }, orderBy: { createdAt: 'desc' }, take: limit }));
