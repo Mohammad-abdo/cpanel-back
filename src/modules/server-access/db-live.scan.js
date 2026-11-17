@@ -54,6 +54,34 @@ export function mongoListCollectionsCmd(db, auth = null) {
   ].join('; ');
 }
 
+/** Sample documents from one collection (JSON array). No arbitrary query strings. */
+export function mongoSampleCmd(db, collection, limit = 50, auth = null) {
+  const dbName = assertSafeDbName(db);
+  const coll = assertSafeIdent(collection, 'collection');
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const evalJs = `JSON.stringify(db.getSiblingDB(${JSON.stringify(dbName)}).getCollection(${JSON.stringify(coll)}).find().limit(${lim}).toArray())`;
+  if (auth?.username) {
+    const user = assertSafeDbUser(auth.username);
+    const pass = String(auth.password ?? '');
+    return [
+      'ERRFILE=$(mktemp)',
+      `OUT=$(mongosh --quiet --username ${shQuote(user)} --password ${shQuote(pass)} --eval ${shQuote(evalJs)} 2>>"$ERRFILE"); EC=$?`,
+      'printf "%s" "$OUT"',
+      'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+      'rm -f "$ERRFILE"',
+      '[ -n "$OUT" ]',
+    ].join('; ');
+  }
+  return [
+    'ERRFILE=$(mktemp)',
+    `OUT=$(mongosh --quiet --eval ${shQuote(evalJs)} 2>>"$ERRFILE"); EC=$?`,
+    'printf "%s" "$OUT"',
+    'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+    'rm -f "$ERRFILE"',
+    '[ -n "$OUT" ]',
+  ].join('; ');
+}
+
 export const SAFE_ENGINE = new Set(['mysql', 'postgres', 'mongodb']);
 export const SAFE_IDENT = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const SAFE_DB_NAME = /^[A-Za-z0-9_-]{1,64}$/;

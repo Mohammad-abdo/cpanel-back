@@ -44,6 +44,7 @@ import { rootDomainsRouter } from './modules/root-domains/root-domains.routes.js
 import { githubRouter } from './modules/github/github.routes.js';
 import { portsRouter } from './modules/ports/ports.routes.js';
 import { uptimeRouter } from './modules/uptime/uptime.routes.js';
+import { serverBackupsRouter } from './modules/server-backups/server-backups.routes.js';
 
 export const apiRouter = Router();
 
@@ -61,6 +62,7 @@ apiRouter.use('/servers', portsRouter);
 apiRouter.use('/servers', mailServerRouter);
 apiRouter.use('/servers', agentGatewayRouter);
 apiRouter.use('/servers', serverCleanupRouter);
+apiRouter.use('/servers', serverBackupsRouter);
 apiRouter.use('/projects', cronRouter);
 apiRouter.use('/projects', projectEnvRouter);
 apiRouter.use('/projects', projectsRouter);

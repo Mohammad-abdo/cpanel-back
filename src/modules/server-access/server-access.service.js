@@ -24,6 +24,7 @@ import {
   listTablesSql,
   mongoListCollectionsCmd,
   mongoListDatabasesCmd,
+  mongoSampleCmd,
   mysqlAdminCmd,
   mysqlCmd,
   parseMysqlBatch,
@@ -866,7 +867,7 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     /**
      * Live DB browse over SSH CLI (MySQL / Postgres / MongoDB). Owner MFA only.
      * action: schemas | tables | columns | rows | query
-     * MongoDB supports schemas (databases) and tables (collections) via mongosh; columns/rows/query stay SQL-only.
+     * MongoDB supports schemas, tables (collections), and row samples via mongosh; columns/query stay SQL-only.
      */
     async dbBrowse(serverId, { engine, action, db, table, sql, limit, offset, auth = null }, actor) {
       requireOwner(actor);
@@ -934,7 +935,46 @@ export function createServerAccessService({ prisma, connector, auditService = nu
               const tables = (Array.isArray(names) ? names : []).map((name) => ({ name, collection: name }));
               return { engine, db, columns: ['name'], tables, collectedAt: now().toISOString(), usedLogin: Boolean(login) };
             }
-            throw new AppError(422, 'DB_ACTION_UNSUPPORTED', 'MongoDB browse supports schemas and tables (collections) only');
+            if (action === 'columns') {
+              throw new AppError(422, 'DB_ACTION_UNSUPPORTED', 'MongoDB column metadata is not available; use rows to sample documents');
+            }
+            if (action === 'rows') {
+              if (typeof db !== 'string' || !db.trim()) {
+                throw new AppError(422, 'DB_NAME_REQUIRED', 'Database name is required');
+              }
+              if (typeof table !== 'string' || !table.trim()) {
+                throw new AppError(422, 'DB_TABLE_REQUIRED', 'Collection name is required');
+              }
+              assertSafeDbName(db);
+              assertSafeIdent(table, 'collection');
+              const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+              const text = await run(mongoSampleCmd(db, table, lim, login));
+              let docs = [];
+              try {
+                docs = JSON.parse(String(text).trim());
+              } catch {
+                throw new AppError(502, 'DB_LIVE_PARSE', 'MongoDB sample response was not valid JSON');
+              }
+              if (!Array.isArray(docs)) docs = [];
+              const rows = docs.map((doc) => {
+                const id = doc?._id;
+                return {
+                  _id: id == null ? '' : typeof id === 'object' ? JSON.stringify(id) : String(id),
+                  doc: JSON.stringify(doc ?? {}),
+                };
+              });
+              return {
+                engine,
+                db,
+                table,
+                columns: ['_id', 'doc'],
+                rows,
+                limit: lim,
+                collectedAt: now().toISOString(),
+                usedLogin: Boolean(login),
+              };
+            }
+            throw new AppError(422, 'DB_ACTION_UNSUPPORTED', 'MongoDB browse does not support arbitrary queries');
           }
 
           if (action === 'schemas') {

@@ -252,8 +252,30 @@ model Server {
   mailService ServerMailService?
   cronJobs    CronJob[]
   portReservations PortReservation[]
+  backupSettings ServerBackupSettings?
 
   @@index([status])
+}
+
+/// Whole-server backup preferences (vercel-clone server_backups parity). Execution uses BACKUP_EXECUTOR.
+model ServerBackupSettings {
+  id             String    @id @default(uuid())
+  serverId       String    @unique
+  enabled        Boolean   @default(false)
+  includeMysql   Boolean   @default(true)
+  includePostgres Boolean  @default(false)
+  includeFiles   Boolean   @default(false)
+  filesPath      String?   @db.VarChar(512)
+  retainCount    Int       @default(7)
+  scheduleCron   String?   @db.VarChar(64)
+  lastRunAt      DateTime?
+  lastStatus     String?   @db.VarChar(24)
+  lastError      String?   @db.VarChar(500)
+  metaJson       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
 }
 
 model ServerAgent {
