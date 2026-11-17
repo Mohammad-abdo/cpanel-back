@@ -21,7 +21,16 @@ export function createBackupsController(svc) {
       res.status(201).json({ data: await svc.runBackup(req.validated.params.id, req.validated.body, req.user) });
     },
     async verifyArtifact(req, res) {
-      res.status(200).json({ data: await svc.verifyArtifact(req.validated.params.id, req.user) });
+      res.status(200).json({ data: await svc.verifyArtifact(req.validated.params.id, req.user, { testRestore: req.validated.body?.testRestore === true }) });
+    },
+    async executorStatus(req, res) {
+      res.status(200).json({ data: await svc.executorStatus(req.user) });
+    },
+    async setOffsite(req, res) {
+      res.status(200).json({ data: await svc.setOffsite(req.validated.body, req.user) });
+    },
+    async clearOffsite(req, res) {
+      res.status(200).json({ data: await svc.clearOffsite(req.user) });
     },
     async planRetention(req, res) {
       res.status(200).json({ data: await svc.planRetention(req.validated.params.id, req.user) });

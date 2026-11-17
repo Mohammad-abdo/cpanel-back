@@ -3,6 +3,7 @@ import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { sha256 } from '../platform/platform.crypto.js';
+import { CADDY_APPLY_SCRIPT, DETECT_WEBSERVER_SCRIPT, isCaddyEnabled, lintCaddySite, parseWebserverProbe, renderCaddySite } from './domains.proxy.js';
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const HOST = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}\.?$/;
@@ -170,17 +171,66 @@ export function createDomainsService({ prisma, now = () => new Date(), auditServ
       return { applied: true, simulated: Boolean(adapters.simulated), diff: preview.diff };
     },
 
+    /** Read-only: Caddyfile snippet for a reverse-proxy site, with a local lint. CADDY_MODE does not matter for previews. */
+    async previewCaddy(id, input, actor) {
+      const domain = await load(id);
+      await authorize(actor, domain.projectId, input.environmentId);
+      const config = renderCaddySite({ hostname: domain.name, upstreamPort: input.upstreamPort, wwwRedirect: input.wwwRedirect });
+      const lint = lintCaddySite(config);
+      return {
+        domain: domain.name,
+        config,
+        diff: config.split('\n').filter(Boolean).map((l) => `+ ${l}`),
+        valid: lint.ok,
+        errors: lint.errors,
+        impact: [`Writes /etc/caddy/sites/${domain.name}.caddy`, 'Runs caddy validate, then reloads Caddy; rolls back on failure'],
+        caddyMode: isCaddyEnabled(env) ? 'on' : 'off',
+      };
+    },
+
+    /** Approval-gated (caddy.apply). Closed unless CADDY_MODE=on and an SSH runner is wired. */
+    async applyCaddy(id, input, actor) {
+      const domain = await load(id);
+      await authorize(actor, domain.projectId, input.environmentId);
+      if (!isCaddyEnabled(env)) throw new AppError(409, 'CADDY_DISABLED', 'Caddy mode is off (CADDY_MODE)');
+      if (!domain.serverId) throw new AppError(409, 'DOMAIN_NO_SERVER', 'Domain is not linked to a server');
+      if (!scriptRunner) throw new AppError(500, 'SSH_UNAVAILABLE', 'SSH runner is not wired');
+      const preview = await this.previewCaddy(id, input, actor);
+      if (!preview.valid) throw new AppError(422, 'CADDY_INVALID', 'Caddy site failed validation');
+      const gate = await platform.gate(
+        { action: 'caddy.apply', binding: sha256(preview.config), resourceType: 'domain', resourceId: id, approvalId: input.approvalId, reason: input.reason, impact: preview.impact, rollbackPlan: input.rollbackNote, context: { environmentId: input.environmentId } },
+        actor,
+      );
+      if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
+      const res = await scriptRunner.run(domain.serverId, CADDY_APPLY_SCRIPT, { args: [domain.name], stdin: preview.config, timeoutMs: 60_000 });
+      const ok = res.code === 0 && /NT_CADDY=applied/.test(res.stdout);
+      await audit({ actorId: actor.id, action: 'caddy.apply', resourceType: 'domain', resourceId: id, environmentId: input.environmentId, result: ok ? 'success' : 'failure', metadata: { exitCode: res.code } });
+      if (!ok) throw new AppError(502, 'CADDY_APPLY_FAILED', 'Caddy apply failed and was rolled back on the server');
+      return { applied: true, diff: preview.diff };
+    },
+
+    /** Read-only SSH probe: which web server owns ports 80/443. Changes nothing. */
+    async detectWebserver(id, input, actor) {
+      const domain = await load(id);
+      await authorize(actor, domain.projectId, input.environmentId);
+      if (!domain.serverId) throw new AppError(409, 'DOMAIN_NO_SERVER', 'Domain is not linked to a server');
+      if (!scriptRunner) throw new AppError(500, 'SSH_UNAVAILABLE', 'SSH runner is not wired');
+      const res = await scriptRunner.run(domain.serverId, DETECT_WEBSERVER_SCRIPT, { timeoutMs: 20_000 });
+      if (res.code !== 0 && !res.stdout) throw new AppError(502, 'WEBSERVER_PROBE_FAILED', 'Could not probe the web server');
+      return { domain: domain.name, ...parseWebserverProbe(res.stdout) };
+    },
+
     async changeDns(id, input, actor) {
       const domain = await load(id);
       await authorize(actor, domain.projectId, input.environmentId);
       validateDnsRecord(domain.name, input);
       const impact = [`${input.op} ${input.type} ${input.name} -> ${input.value} (ttl ${input.ttl})`, 'Traffic for this name may shift after TTL expires'];
       const gate = await platform.gate(
-        { action: 'dns.change', binding: sha256(JSON.stringify([input.op, input.type, input.name, input.value, input.ttl])), resourceType: 'domain', resourceId: id, approvalId: input.approvalId, reason: input.reason, impact, rollbackPlan: input.rollbackNote, context: { environmentId: input.environmentId } },
+        { action: 'dns.change', binding: sha256(JSON.stringify(input.proxied ? [input.op, input.type, input.name, input.value, input.ttl, true] : [input.op, input.type, input.name, input.value, input.ttl])), resourceType: 'domain', resourceId: id, approvalId: input.approvalId, reason: input.reason, impact, rollbackPlan: input.rollbackNote, context: { environmentId: input.environmentId } },
         actor,
       );
       if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
-      const record = { type: input.type, name: input.name, value: input.value, ttl: input.ttl };
+      const record = { type: input.type, name: input.name, value: input.value, ttl: input.ttl, domain: domain.name, proxied: Boolean(input.proxied) };
       try {
         await (input.op === 'upsert' ? adapters.dns.upsert(record) : adapters.dns.remove(record));
       } catch {
@@ -197,7 +247,7 @@ export function createDomainsService({ prisma, now = () => new Date(), auditServ
         saved = await prisma.dnsRecord.create({ data: { domainId: id, type: input.type, name: input.name, valueSummary: input.value.slice(0, 255), ttl: input.ttl } });
       }
       await audit({ actorId: actor.id, action: 'dns.change', resourceType: 'domain', resourceId: id, environmentId: input.environmentId, result: 'success', before: existing ? { value: existing.valueSummary } : undefined, after: { op: input.op, type: input.type, name: input.name } });
-      return { record: saved, op: input.op, simulated: Boolean(adapters.simulated) };
+      return { record: saved, op: input.op, simulated: adapters.dns.simulated ?? Boolean(adapters.simulated) };
     },
   };
 }

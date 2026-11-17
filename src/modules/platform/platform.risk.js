@@ -42,6 +42,10 @@ export const ACTION_RISK = Object.freeze({
   // Phase 11 (TASK-048): custom cron commands and server cleanup apply.
   'cron.custom.command': RISK.HIGH,
   'server.cleanup.apply': RISK.HIGH,
+  // Phase 11 (TASK-045/047): publishing a preview hostname (DNS + proxy), applying a Caddy site, and issuing a wildcard certificate.
+  'preview.expose': RISK.HIGH,
+  'caddy.apply': RISK.HIGH,
+  'ssl.wildcard.issue': RISK.HIGH,
 });
 
 export const requiresApproval = (action) => {

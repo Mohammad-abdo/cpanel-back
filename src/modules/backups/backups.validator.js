@@ -44,4 +44,17 @@ export const retentionBodySchema = z
   })
   .strict();
 
-export const verifyBodySchema = z.object({ environmentId: z.string().uuid().optional() }).strict();
+export const verifyBodySchema = z.object({ environmentId: z.string().uuid().optional(), testRestore: z.boolean().optional() }).strict();
+
+/** Offsite S3-compatible target. secretAccessKey may be omitted on update to keep the stored one. */
+export const offsiteBodySchema = z
+  .object({
+    endpoint: z.string().url().max(300),
+    bucket: z.string().min(3).max(63),
+    region: z.string().min(2).max(32).default('us-east-1'),
+    prefix: z.string().max(120).default('nodeteam'),
+    accessKeyId: z.string().min(8).max(128),
+    secretAccessKey: z.string().min(8).max(256).optional(),
+    enabled: z.boolean().default(false),
+  })
+  .strict();

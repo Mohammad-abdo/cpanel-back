@@ -9,14 +9,20 @@ import {
   listDomainsQuerySchema,
   vhostBodySchema,
   domainConfBodySchema,
+  caddyBodySchema,
+  applyCaddyBodySchema,
+  detectWebserverBodySchema,
 } from './domains.validator.js';
 import { createDomainsController } from './domains.controller.js';
 import { createDomainsService } from './domains.service.js';
 import { getDeps } from '../platform/platform.wiring.js';
 import { wrap } from '../platform/platform.http.js';
 import { serverAccessService } from '../server-access/server-access.routes.js';
+import { createScriptRunner } from '../server-access/ssh-script.runner.js';
+import { createSshConnector } from '../server-access/ssh.connector.js';
+import { prisma } from '../../config/prisma.js';
 
-const domainsController = createDomainsController(createDomainsService(getDeps()), { serverAccess: serverAccessService });
+const domainsController = createDomainsController(createDomainsService({ ...getDeps(), scriptRunner: createScriptRunner({ prisma, connector: createSshConnector({ timeoutMs: 30_000 }) }) }), { serverAccess: serverAccessService });
 const write = requireSession({ requireMfa: true });
 
 /** Mount at /domains */
@@ -30,3 +36,6 @@ domainsRouter.put('/:id/conf', write, validate(domainIdParamsSchema, 'params'), 
 domainsRouter.post('/:id/vhost/preview', write, validate(domainIdParamsSchema, 'params'), validate(vhostBodySchema, 'body'), wrap(domainsController.previewVhost));
 domainsRouter.post('/:id/vhost/apply', write, validate(domainIdParamsSchema, 'params'), validate(applyVhostBodySchema, 'body'), wrap(domainsController.applyVhost));
 domainsRouter.post('/:id/dns', write, validate(domainIdParamsSchema, 'params'), validate(dnsChangeBodySchema, 'body'), wrap(domainsController.changeDns));
+domainsRouter.post('/:id/caddy/preview', write, validate(domainIdParamsSchema, 'params'), validate(caddyBodySchema, 'body'), wrap(domainsController.previewCaddy));
+domainsRouter.post('/:id/caddy/apply', write, validate(domainIdParamsSchema, 'params'), validate(applyCaddyBodySchema, 'body'), wrap(domainsController.applyCaddy));
+domainsRouter.post('/:id/webserver/detect', write, validate(domainIdParamsSchema, 'params'), validate(detectWebserverBodySchema, 'body'), wrap(domainsController.detectWebserver));

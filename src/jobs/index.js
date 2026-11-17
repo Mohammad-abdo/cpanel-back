@@ -15,13 +15,15 @@ import { createAccessReviewsService } from '../modules/access-reviews/access-rev
 import { getDeps } from '../modules/platform/platform.wiring.js';
 import { logsService } from '../modules/logs/logs.routes.js';
 import { serverAccessService } from '../modules/server-access/server-access.routes.js';
+import { getBackupRuntime } from '../modules/backups/backups.wiring.js';
 import { createScheduler } from './scheduler.js';
 import { buildJobs, parseJobConfig } from './jobs.js';
 
 export function createDefaultServices() {
   const deps = getDeps();
   const auditService = createAuditService({ prisma });
-  const backups = createBackupsService({ ...deps, serverAccessService });
+  const runtime = getBackupRuntime({ serverAccessService, adapters: deps.adapters });
+  const backups = createBackupsService({ ...deps, serverAccessService, executor: runtime.executor, offsiteConfig: runtime.offsiteConfig });
   return {
     prisma,
     operations: createOperationsService({

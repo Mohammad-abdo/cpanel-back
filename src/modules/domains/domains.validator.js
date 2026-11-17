@@ -45,6 +45,8 @@ export const dnsChangeBodySchema = z
     name: z.string().trim().toLowerCase().min(1).max(253),
     value: z.string().min(1).max(512),
     ttl: z.number().int().min(60).max(86400).default(300),
+    /** Cloudflare only: route through the proxy (A/AAAA/CNAME). Ignored by other providers. */
+    proxied: z.boolean().optional(),
     environmentId: z.string().uuid(),
     ...approvalFields,
   })
@@ -55,3 +57,15 @@ export const domainConfBodySchema = z
     content: z.string().max(1024 * 1024),
   })
   .strict();
+
+export const caddyBodySchema = z
+  .object({
+    upstreamPort: z.number().int().min(1).max(65535),
+    wwwRedirect: z.boolean().default(false),
+    environmentId: z.string().uuid(),
+  })
+  .strict();
+
+export const applyCaddyBodySchema = caddyBodySchema.extend(approvalFields).strict();
+
+export const detectWebserverBodySchema = z.object({ environmentId: z.string().uuid() }).strict();

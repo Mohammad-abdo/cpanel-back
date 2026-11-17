@@ -8,13 +8,16 @@ import { createBackupsService } from '../backups/backups.service.js';
 import { getDeps } from '../platform/platform.wiring.js';
 import { wrap } from '../platform/platform.http.js';
 import { serverAccessService } from '../server-access/server-access.routes.js';
+import { getBackupRuntime } from '../backups/backups.wiring.js';
 
 const deps = getDeps();
+const runtime = getBackupRuntime({ serverAccessService, adapters: deps.adapters });
 const c = createRestoresController(
   createRestoresService({
     ...deps,
     serverAccessService,
-    backups: createBackupsService({ ...deps, serverAccessService }),
+    executor: runtime.executor,
+    backups: createBackupsService({ ...deps, serverAccessService, executor: runtime.executor, offsiteConfig: runtime.offsiteConfig }),
   }),
 );
 const write = requireSession({ requireMfa: true });

@@ -1399,3 +1399,78 @@ model CronRun {
   @@index([jobId, startedAt])
   @@index([status, startedAt])
 }
+
+// ---------------------------------------------------------------------------
+// Phase 11 - TASK-047 root domains / DNS provider and TASK-045 PR preview environments. Additive; no relations to existing models.
+// ---------------------------------------------------------------------------
+
+/// A DNS zone managed through a provider adapter (cloudflare | simulated). The API token is AES-256-GCM encrypted and never returned.
+model RootDomain {
+  id          String    @id @default(uuid())
+  name        String    @unique @db.VarChar(253)
+  provider    String    @default("simulated") @db.VarChar(20)
+  zoneId      String?   @db.VarChar(64)
+  tokenEnc    Bytes?    @db.Blob
+  status      String    @default("active") @db.VarChar(20)
+  /// Non-secret metadata (zone status, last verified timestamp).
+  metaJson    Json?
+  createdById String?
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+/// Per-project preview environment settings. The GitHub token (PR comments) is encrypted and optional; comments are off by default.
+model ProjectPreviewSettings {
+  id             String   @id @default(uuid())
+  projectId      String   @unique
+  enabled        Boolean  @default(false)
+  rootDomainId   String?
+  /// Per-PR environment variables copied from this environment code (allowlist in envKeysJson).
+  sourceEnvCode  String?  @db.VarChar(40)
+  envKeysJson    Json?
+  portStart      Int      @default(20000)
+  portEnd        Int      @default(20999)
+  ttlDays        Int      @default(7)
+  maxActive      Int      @default(5)
+  basicAuth      Boolean  @default(false)
+  /// per-pr: one DNS record per preview. wildcard: a wildcard record already exists, no per-PR DNS change.
+  dnsMode        String   @default("per-pr") @db.VarChar(12)
+  commentEnabled Boolean  @default(false)
+  githubTokenEnc Bytes?   @db.Blob
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model PreviewEnvironment {
+  id             String    @id @default(uuid())
+  projectId      String
+  environmentId  String?
+  serverId       String
+  prNumber       Int
+  branch         String    @db.VarChar(255)
+  commitSha      String?   @db.VarChar(40)
+  /// creating | deploying | awaiting_exposure | active | failed | destroying | destroyed
+  status         String    @default("creating") @db.VarChar(24)
+  port           Int?
+  hostname       String    @db.VarChar(253)
+  url            String    @db.VarChar(300)
+  deploymentId   String?
+  basicAuthUser  String?   @db.VarChar(40)
+  /// bcrypt hash only. The generated password is shown once at creation.
+  basicAuthHash  String?   @db.VarChar(100)
+  rootDomainId   String?
+  dnsStatus      String?   @db.VarChar(24)
+  exposeApprovalId String? @db.VarChar(36)
+  commentId      String?   @db.VarChar(30)
+  lastError      String?   @db.VarChar(500)
+  expiresAt      DateTime
+  closedAt       DateTime?
+  destroyedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([projectId, prNumber])
+  @@unique([serverId, port])
+  @@index([status, expiresAt])
+}

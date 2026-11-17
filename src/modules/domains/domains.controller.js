@@ -17,6 +17,15 @@ export function createDomainsController(domainsService, { serverAccess = null } 
     async applyVhost(req, res) {
       respond(res, await domainsService.applyVhost(req.validated.params.id, req.validated.body, req.user));
     },
+    async previewCaddy(req, res) {
+      res.status(200).json({ data: await domainsService.previewCaddy(req.validated.params.id, req.validated.body, req.user) });
+    },
+    async applyCaddy(req, res) {
+      respond(res, await domainsService.applyCaddy(req.validated.params.id, req.validated.body, req.user));
+    },
+    async detectWebserver(req, res) {
+      res.status(200).json({ data: await domainsService.detectWebserver(req.validated.params.id, req.validated.body, req.user) });
+    },
     async changeDns(req, res) {
       respond(res, await domainsService.changeDns(req.validated.params.id, req.validated.body, req.user));
     },

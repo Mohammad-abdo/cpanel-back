@@ -3,6 +3,7 @@ import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { decrypt, encrypt, sha256 } from '../platform/platform.crypto.js';
+import { isolatedDbName } from '../backups/backups.commands.js';
 
 /** select -> validate -> impact preview -> approval -> safety backup -> restore -> health -> audit */
 export const RESTORE_TRANSITIONS = Object.freeze({
@@ -27,9 +28,11 @@ export function createRestoresService({
   adapters = null,
   backups = null,
   serverAccessService = null,
+  executor = null,
   credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
 }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
+  const live = () => Boolean(executor?.enabled);
 
   async function authorize(actor, projectId, environmentId) {
     if (!actor?.id) throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
@@ -125,6 +128,19 @@ export function createRestoresService({
     } catch {
       return { healthy: false, source: 'ssh-live' };
     }
+  }
+
+  /**
+   * Real executor database restore. Isolated: always a NEW database (nt_restore_*), never the source. In-place:
+   * writes the live database and is only reachable after approval + a completed safety backup (enforced by execute()).
+   */
+  async function execRestoreDb({ policy, plain, actor, mode, runId }) {
+    const row = await backups.findExecTarget(policy);
+    if (!row) throw new AppError(409, 'BACKUP_TARGET_NOT_FOUND', 'No managed database with a server and saved login was found for this environment');
+    const auth = backups.instanceAuth(row.instance);
+    const db = mode === 'isolated' ? isolatedDbName(runId, now()) : row.dbName;
+    const res = await executor.restoreDatabase({ serverId: row.instance.serverId, engine: row.instance.engine, db, sourceDb: row.dbName, username: auth.username, password: auth.password, bytes: plain, mode }, actor);
+    return { restored: res.restored, checksums: { db: res.checksum }, simulated: false, source: 'ssh-exec', live: null, isolatedDb: mode === 'isolated' ? db : null, tables: res.tables };
   }
 
   /**

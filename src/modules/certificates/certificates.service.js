@@ -3,13 +3,14 @@ import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { notifyChannels } from '../notifications/notifications.service.js';
+import { probeTls } from './certificates.probe.js';
 
 export const RENEW_WINDOW_DAYS = 30;
 const DAY = 86400000;
 
 /** Derived state: an expired certificate is reported as expired even if the stored status is stale. */
 export function classify(cert, now = new Date()) {
-  if (cert.status === 'failed' || cert.status === 'pending') return cert.status;
+  if (cert.status === 'failed' || cert.status === 'pending' || cert.status === 'invalid') return cert.status;
   if (!cert.expiresAt) return 'unknown';
   const left = new Date(cert.expiresAt).getTime() - now.getTime();
   if (left <= 0) return 'expired';
@@ -17,7 +18,7 @@ export function classify(cert, now = new Date()) {
   return 'valid';
 }
 
-export function createCertificatesService({ prisma, now = () => new Date(), auditService = null, rbac = null, platform = null, adapters = null }) {
+export function createCertificatesService({ prisma, now = () => new Date(), auditService = null, rbac = null, platform = null, adapters = null, probe = probeTls, env = process.env }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const present = (c) => ({ ...c, state: classify(c, now()), daysLeft: c.expiresAt ? Math.floor((new Date(c.expiresAt) - now()) / DAY) : null });
 
@@ -68,6 +69,36 @@ export function createCertificatesService({ prisma, now = () => new Date(), audi
       return out;
     },
 
+    /**
+     * TASK-047: real expiry scan. Handshakes with each active domain that has a certificate record (CERT_EXPIRY_PROBE=1 enables
+     * it in the job runners), stores the observed expiry, marks untrusted chains `invalid`, then runs the regular expiry
+     * scan so the existing alerts fire. Probe failures keep the stored data and are only counted.
+     */
+    async scanLive({ limit = 200, probeOptions = {} } = {}) {
+      const domains = await prisma.domain.findMany({ where: { archivedAt: null, status: 'active' }, take: limit, orderBy: { name: 'asc' } });
+      const out = { probed: 0, updated: 0, invalid: [], unreachable: 0 };
+      for (const d of domains) {
+        const certs = await prisma.sslCertificate.findMany({ where: { domainId: d.id }, orderBy: { createdAt: 'desc' } });
+        const cert = certs.find((c) => ['active', 'expiring', 'expired', 'invalid', 'renewal_failed'].includes(c.status));
+        if (!cert) continue;
+        const host = d.name.replace(/^\*\./, '');
+        const res = await probe(host, probeOptions);
+        out.probed += 1;
+        if (!res.ok) {
+          out.unreachable += 1;
+          continue;
+        }
+        const status = res.trusted ? (res.validTo <= now() ? 'expired' : 'active') : 'invalid';
+        await prisma.sslCertificate.update({ where: { id: cert.id }, data: { expiresAt: res.validTo, status, lastError: res.trusted ? null : String(res.authorizationError).slice(0, 190) } });
+        out.updated += 1;
+        if (!res.trusted) {
+          out.invalid.push({ certificateId: cert.id, reason: res.authorizationError });
+          notifyChannels({ type: 'certificate.expiring', severity: 'critical', title: 'Certificate chain is not trusted', resourceType: 'certificate', resourceId: cert.id, dedupeKey: `certificate.invalid:${cert.id}` }, { prisma });
+        }
+      }
+      return { ...out, expiry: await this.scanExpiry() };
+    },
+
     async issue(domainId, input, actor) {
       const domain = await loadDomain(domainId);
       await authorize(actor, domain, input.environmentId);
@@ -85,10 +116,10 @@ export function createCertificatesService({ prisma, now = () => new Date(), audi
       if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
       const cert = await prisma.sslCertificate.create({ data: { domainId, status: 'pending', provider: null } });
       try {
-        const res = await adapters.acme.issue({ domain: domain.name, challenge: input.challenge, wildcard: input.wildcard });
+        const res = await adapters.acme.issue({ domain: domain.name, challenge: input.challenge, wildcard: input.wildcard, serverId: domain.serverId ?? null });
         const saved = await prisma.sslCertificate.update({ where: { id: cert.id }, data: { status: 'active', provider: res.provider, expiresAt: res.expiresAt } });
         await audit({ actorId: actor.id, action: 'ssl.issue', resourceType: 'domain', resourceId: domainId, environmentId: input.environmentId, result: 'success', after: { certificateId: cert.id, expiresAt: res.expiresAt } });
-        return { ...present(saved), simulated: Boolean(adapters.simulated) };
+        return { ...present(saved), simulated: adapters.acme.simulated ?? Boolean(adapters.simulated) };
       } catch {
         await prisma.sslCertificate.update({ where: { id: cert.id }, data: { status: 'failed' } });
         await audit({ actorId: actor.id, action: 'ssl.issue', resourceType: 'domain', resourceId: domainId, environmentId: input.environmentId, result: 'failure' });
