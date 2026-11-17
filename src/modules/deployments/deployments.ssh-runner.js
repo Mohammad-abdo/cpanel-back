@@ -23,6 +23,8 @@ import {
   ROLLBACK_SCRIPT,
   RUN_SCRIPT,
   SWITCH_SCRIPT,
+  TEARDOWN_SCRIPT,
+  PREVIEW_BASE_PATH,
   buildEnvFile,
   detectFramework,
   resolveCommand,
@@ -246,6 +248,19 @@ export function createSshRunner({
         const pm = await runStep({ ...base, name: mode === 'none' ? 'static site (no process)' : 'pm2 reload', script: PM2_SCRIPT(PM2_ENV_SETUP), args: [ctx.config.basePath, ctx.config.pm2App, mode, ctx.config.startFile ?? ''], timeoutMs: t.pm2 });
         if (!pm.ok) return failure([rb, pm]);
         return { ok: true, detail: { commands: summarize([rb, pm]), restoredCommit: sha || null } };
+      });
+    },
+
+    /** TASK-045: stop a preview's process and delete its directory. Only `pr-<n>` environments with a preview base path are accepted. */
+    async teardown({ projectId, environmentId, serverId }) {
+      const project = await prisma.project.findUnique({ where: { id: projectId } });
+      const environment = await prisma.projectEnvironment.findUnique({ where: { id: environmentId } });
+      if (!project || !environment || environment.projectId !== project.id) throw new AppError(404, 'PROJECT_NOT_FOUND', 'Project or environment missing');
+      const config = resolveDeployConfig({ project, environment, runtimeMeta: null });
+      if (!PREVIEW_BASE_PATH.test(config.basePath)) throw new AppError(422, 'TEARDOWN_PATH_REFUSED', 'Teardown only applies to preview environments');
+      return withClient(serverId ?? project.serverId, async (client) => {
+        const res = await execScriptStdin(client, TEARDOWN_SCRIPT(PM2_ENV_SETUP), { args: [config.basePath, config.pm2App], timeoutMs: t.prune });
+        return { ok: res.code === 0 && !res.timedOut, detail: { basePath: config.basePath, pm2App: config.pm2App, exitCode: res.code } };
       });
     },
 

@@ -11,7 +11,7 @@ import { sharedDeployLocks } from './deployments.commands.js';
  */
 export function createSimulatedRunner() {
   const ok = (what) => async () => ({ ok: true, detail: { simulated: true, step: what } });
-  return { name: 'simulated', prepare: ok('prepare'), build: ok('build'), deploy: ok('deploy'), rollback: ok('rollback') };
+  return { name: 'simulated', prepare: ok('prepare'), build: ok('build'), deploy: ok('deploy'), rollback: ok('rollback'), teardown: ok('teardown') };
 }
 
 /** Health checker port. The simulated checker reports healthy and flags the result as simulated. */

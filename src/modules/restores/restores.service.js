@@ -423,15 +423,28 @@ export function createRestoresService({
           approverId: state.approvedById,
           live: usedLive,
           panelConfig: usedPanel,
+          executor: usedExec,
+          isolatedDb,
         },
       });
+      // RTO measurement: wall-clock restore time against the policy objective. Persisted when metricsJson exists.
+      const rtoMs = Math.max(0, now().getTime() - startedAt.getTime());
+      const metrics = { rtoMeasuredMs: rtoMs, rtoTargetMinutes: policy.rtoMinutes ?? null, withinRto: policy.rtoMinutes ? rtoMs <= policy.rtoMinutes * 60000 : null, executor: usedExec ? 'ssh' : 'simulated', mode, persisted: true };
+      try {
+        await prisma.restoreRun.update({ where: { id }, data: { metricsJson: metrics } });
+      } catch {
+        metrics.persisted = false; // schemaPending: column not migrated / stale client
+      }
       return {
         restore: state,
         mode,
         safetyBackupRunId,
-        simulated: usedLive || usedPanel ? false : Boolean(adapters.simulated),
+        simulated: usedLive || usedPanel || usedExec ? false : Boolean(adapters.simulated),
         live: usedLive,
         panelConfig: usedPanel,
+        executor: usedExec,
+        isolatedDb,
+        metrics,
       };
     },
   };

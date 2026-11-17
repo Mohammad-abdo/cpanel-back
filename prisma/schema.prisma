@@ -662,6 +662,8 @@ model BackupRun {
 
   @@index([policyId, startedAt])
   trigger String?
+  /// TASK-049 measurements (duration, bytes, RPO/RTO targets). Never secrets.
+  metricsJson Json?
 }
 
 model BackupArtifact {
@@ -697,6 +699,8 @@ model RestoreRun {
   safetyBackupRunId String?
   mode String?
   previewJson Json?
+  /// TASK-049 measured RTO and executor mode. Never secrets.
+  metricsJson Json?
 }
 
 // ─── Monitoring ─────────────────────────────────────────────

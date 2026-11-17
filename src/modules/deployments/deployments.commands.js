@@ -97,9 +97,16 @@ export function detectFramework(pkg) {
   return { framework: 'static', static: true, install: null, build: scripts.build ? 'npm run build' : null, outputDir: scripts.build ? 'dist' : '.', start: null };
 }
 
+/** TASK-045: preview environments use the code `pr-<number>`. They never inherit the project's fixed base path, pm2 name or health URL. */
+export const PREVIEW_ENV_CODE = /^pr-[1-9][0-9]{0,8}$/;
+export const isPreviewEnvCode = (code) => PREVIEW_ENV_CODE.test(String(code ?? ''));
+/** Teardown deletes this directory, so it must be exactly /var/www/nt-deploy/<slug>/pr-<n>. */
+export const PREVIEW_BASE_PATH = new RegExp("^/var/www/nt-deploy/[a-z0-9][a-z0-9._-]{0,62}/pr-[1-9][0-9]{0,8}$");
+
 /** Normalized deploy settings (ProjectRuntime.metaJson.deploy) with safe defaults. */
 export function resolveDeployConfig({ project, environment, runtimeMeta }) {
-  const d = runtimeMeta?.deploy ?? {};
+  const preview = isPreviewEnvCode(environment.code);
+  const d = preview ? { ...(runtimeMeta?.deploy ?? {}), basePath: undefined, pm2App: undefined, healthUrl: undefined } : (runtimeMeta?.deploy ?? {});
   const slug = project.slug;
   if (!SAFE_SLUG.test(String(slug))) throw new AppError(422, 'PROJECT_SLUG_UNSAFE', 'Project slug is not safe for filesystem use');
   const basePath = d.basePath ?? `/var/www/nt-deploy/${slug}/${environment.code}`;
@@ -280,6 +287,25 @@ echo "current -> $REL"
 `;
 
 /** args: BASE KEEP. Removes old releases but never the current or previous target. */
+/** args: BASE APP_NAME. Stops the preview's pm2 app and removes its directory. Refuses anything that is not a preview path. */
+export const TEARDOWN_SCRIPT = (pm2Env) => `set -eu
+BASE="$1"; APP="$2"
+case "$BASE" in
+  /var/www/nt-deploy/*/pr-[1-9]*) ;;
+  *) echo "refusing teardown outside preview paths" >&2; exit 64 ;;
+esac
+case "$BASE" in *..*|*' '*|*[!A-Za-z0-9._/-]*) echo "unsafe path" >&2; exit 64 ;; esac
+case "$APP" in ''|*[!A-Za-z0-9._:-]*) echo "bad app" >&2; exit 64 ;; esac
+set +u
+${pm2Env}
+if [ -n "$PM2_BIN" ]; then
+  pm2_exec delete "$APP" >/dev/null 2>&1 || true
+  pm2_exec save >/dev/null 2>&1 || true
+fi
+rm -rf -- "$BASE"
+echo "teardown done"
+`;
+
 export const PRUNE_SCRIPT = `${PREAMBLE}
 KEEP="$1"
 CUR=$(readlink "$BASE/current" 2>/dev/null || true)
