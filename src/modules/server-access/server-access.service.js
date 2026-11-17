@@ -6,7 +6,7 @@ import { decrypt, encrypt } from '../platform/platform.crypto.js';
 import { redact } from '../audit/audit.service.js';
 import { statusFromSummary } from '../agents/agents.service.js';
 import { execCommand, execScript, execScriptStdin, openSftp } from './ssh.connector.js';
-import { INVENTORY_SCRIPT, isJunkProjectPath, parseInventory } from './server-inventory.scan.js';
+import { INVENTORY_SCRIPT, isGithubRemote, isJunkProjectPath, parseInventory, projectImportIssues } from './server-inventory.scan.js';
 import { SITE_LIVE_SCRIPT, assertSafeSitePath, parseSiteLive } from './site-live.scan.js';
 import {
   SAFE_ENGINE,
@@ -1440,6 +1440,16 @@ export function createServerAccessService({ prisma, connector, auditService = nu
           throw new AppError(504, 'INVENTORY_TIMEOUT', 'Inventory scan timed out on the server. Retry in a moment.');
         }
         const inventory = parseInventory(res.stdout);
+        const known = await prisma.project.findMany({
+          where: { serverId, archivedAt: null },
+          include: { runtime: true, repository: true },
+          take: 500,
+        });
+        const knownPaths = new Set(known.map((p) => p.runtime?.metaJson?.discoveredPath).filter(Boolean));
+        const knownRemotes = new Set(known.map((p) => p.repository?.remoteUrl?.toLowerCase()).filter(Boolean));
+        for (const p of inventory.projects) {
+          p.issues = projectImportIssues(p, { knownPaths, knownRemotes });
+        }
         inventory.debug = {
           bytes: res.stdout?.length ?? 0,
           exitCode: res.code,
@@ -1537,9 +1547,26 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             projectId: project.id,
             runtime: c.runtime,
             processManager: c.processManager,
-            metaJson: { discoveredPath: c.path, discoveredAt: inventory.scannedAt, readOnlyDiscovery: true, marker: c.marker },
+            metaJson: {
+              discoveredPath: c.path,
+              discoveredAt: inventory.scannedAt,
+              readOnlyDiscovery: true,
+              marker: c.marker,
+              remoteUrl: c.remoteUrl ?? null,
+              branch: c.branch ?? null,
+              issues: c.issues ?? [],
+            },
           },
         });
+        if (c.remoteUrl && isGithubRemote(c.remoteUrl)) {
+          await prisma.projectRepository.create({
+            data: {
+              projectId: project.id,
+              remoteUrl: c.remoteUrl,
+              defaultBranch: c.branch && c.branch !== 'HEAD' ? c.branch : 'main',
+            },
+          }).catch(() => null);
+        }
         created.projects.push(project);
       }
 

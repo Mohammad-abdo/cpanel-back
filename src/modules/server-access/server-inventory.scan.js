@@ -36,6 +36,14 @@ export const INVENTORY_SCRIPT = [
   'command -v mariadb >/dev/null 2>&1 && echo mysql || true',
   'command -v psql >/dev/null 2>&1 && echo postgres || true',
   "ss -tlnH 2>/dev/null | awk '{print $4}' | grep -E ':(3306|5432)$' | head -n 20 || true",
+  // Git remotes for import plan issue codes (no-git / not-github / github).
+  "echo '##git'",
+  'timeout 25 find /var/www /opt/apps /srv/www /home -mindepth 1 -maxdepth 6 -type d -name .git 2>/dev/null | head -n 80 | while read g; do',
+  '  d=$(dirname "$g");',
+  '  remote=$(git -C "$d" remote get-url origin 2>/dev/null || true);',
+  '  branch=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null || true);',
+  '  printf "DIR:%s\\nREMOTE:%s\\nBRANCH:%s\\n" "$d" "$remote" "$branch";',
+  'done',
 ].join('\n');
 
 const SYSTEM_DBS = new Set([
@@ -118,6 +126,34 @@ function slugify(name) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 63);
+}
+
+/** Normalize a git remote to an https URL when possible; null when empty. */
+export function normalizeGitRemote(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  if (/^git@github\.com:/i.test(s)) return `https://github.com/${s.replace(/^git@github\.com:/i, '').replace(/\.git$/i, '')}`;
+  if (/^ssh:\/\/git@github\.com\//i.test(s)) return `https://github.com/${s.replace(/^ssh:\/\/git@github\.com\//i, '').replace(/\.git$/i, '')}`;
+  if (/^https?:\/\/github\.com\//i.test(s)) return s.replace(/\.git$/i, '').replace(/\/$/, '');
+  return s.replace(/\.git$/i, '');
+}
+
+export function isGithubRemote(url) {
+  return /^https?:\/\/github\.com\//i.test(String(url ?? ''));
+}
+
+/** vercel-clone-style issue codes for an import plan row (SSH inventory). */
+export function projectImportIssues(project, { knownPaths = new Set(), knownRemotes = new Set() } = {}) {
+  const issues = [];
+  if (knownPaths.has(project.path)) issues.push('already-known');
+  if (!project.remoteUrl) issues.push('no-git');
+  else if (!isGithubRemote(project.remoteUrl)) issues.push('not-github');
+  else {
+    issues.push('github');
+    if (knownRemotes.has(project.remoteUrl.toLowerCase())) issues.push('repo-taken');
+  }
+  if (!project.domainName) issues.push('no-domain');
+  return issues;
 }
 
 function projectNameFromPath(appDir) {
@@ -298,10 +334,61 @@ export function parseInventory(text) {
     if (apache) pushDomain(apache[1], null, 'apache');
   }
 
-  // Attach matching domain names to site projects for easier linking in the UI
+  // Parse ##git blocks: DIR / REMOTE / BRANCH triples.
+  const gitByDir = new Map();
+  let gitDir = null;
+  for (const line of sec.git ?? []) {
+    const t = line.trim();
+    if (t.startsWith('DIR:')) {
+      gitDir = t.slice(4).trim();
+      continue;
+    }
+    if (!gitDir) continue;
+    if (t.startsWith('REMOTE:')) {
+      const remoteUrl = normalizeGitRemote(t.slice(7));
+      const prev = gitByDir.get(gitDir) ?? { remoteUrl: null, branch: null };
+      prev.remoteUrl = remoteUrl;
+      gitByDir.set(gitDir, prev);
+    } else if (t.startsWith('BRANCH:')) {
+      const prev = gitByDir.get(gitDir) ?? { remoteUrl: null, branch: null };
+      prev.branch = t.slice(7).trim() || null;
+      gitByDir.set(gitDir, prev);
+    }
+  }
+
+  const attachGit = (p) => {
+    const exact = gitByDir.get(p.path);
+    if (exact) return exact;
+    // Prefer longest matching git root under or equal to the project path.
+    let best = null;
+    let bestLen = -1;
+    for (const [dir, info] of gitByDir) {
+      if (p.path === dir || p.path.startsWith(`${dir}/`) || dir.startsWith(`${p.path}/`)) {
+        if (dir.length > bestLen) {
+          best = info;
+          bestLen = dir.length;
+        }
+      }
+    }
+    return best;
+  };
+
+  // Attach matching domain names / ports / git to site projects for the import plan UI
   for (const p of collapsed) {
-    const match = domains.find((d) => d.name === p.name || p.path.endsWith(`/${d.name}`) || p.path.includes(`/${d.name}/`));
-    if (match) p.domainName = match.name;
+    const match = domains.find((d) => d.name === p.name || p.path.endsWith(`/${d.name}`) || p.path.includes(`/${d.name}/`) || d.root === p.path || (d.root && d.root.startsWith(`${p.path}/`)));
+    if (match) {
+      p.domainName = match.name;
+      if (match.upstreamPort != null) p.upstreamPort = match.upstreamPort;
+    }
+    const git = attachGit(p);
+    if (git) {
+      p.remoteUrl = git.remoteUrl;
+      p.branch = git.branch;
+    } else {
+      p.remoteUrl = null;
+      p.branch = null;
+    }
+    p.issues = projectImportIssues(p);
   }
 
   const mysqlSchemas = (sec.mysql ?? []).map((l) => l.trim()).filter((n) => n && !SYSTEM_DBS.has(n));
