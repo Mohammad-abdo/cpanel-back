@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { AppError } from '../../common/errors/app-error.js';
 import { COMMAND_ARGS } from './agent-gateway.validator.js';
+import { parseRecoverOutput, RECOVER_SCRIPT } from './agent-gateway.recover.js';
 import { canonical, deriveAgentKeys, encryptField, sha256Hex, signEnvelope, verifyResult } from './agent-gateway.protocol.js';
 
 const sha = (v) => createHash('sha256').update(v).digest('hex');
@@ -13,7 +14,17 @@ const MAX_RESULT_CHARS = 16_000;
  * Keys are derived per agent from AGENT_CONTROL_SECRET (HKDF), never stored. The agent credential
  * (socket token) alone cannot produce a valid envelope.
  */
-export function createAgentGatewayService({ prisma, auditService = null, platform = null, hub = null, env = process.env, now = () => Date.now(), realtime = null }) {
+export function createAgentGatewayService({
+  prisma,
+  auditService = null,
+  platform = null,
+  hub = null,
+  env = process.env,
+  now = () => Date.now(),
+  realtime = null,
+  serverAccessService = null,
+  connectWaitMs = 20_000,
+}) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const secret = () => {
     const s = env.AGENT_CONTROL_SECRET;
@@ -227,6 +238,84 @@ export function createAgentGatewayService({ prisma, auditService = null, platfor
     async listCommands(serverId, { status, limit = 25 } = {}, actor) {
       if (!actor?.isOwner) throw OWNER_ONLY();
       return guard(() => prisma.agentCommand.findMany({ where: { serverId, ...(status ? { status } : {}) }, orderBy: { createdAt: 'desc' }, take: limit }));
+    },
+
+    /**
+     * Restart an offline agent over SSH (systemd unit or PM2). High risk / Owner MFA.
+     * No-op success when the agent socket is already connected.
+     */
+    async recoverAgent(serverId, { approvalId, reason } = {}, actor) {
+      if (!actor?.isOwner) throw OWNER_ONLY();
+      const agent = await activeAgent(serverId);
+      if (hub?.isConnected(agent.agentPublicId)) {
+        return { ok: true, alreadyConnected: true, connected: true, steps: [{ step: 'socket', ok: true, detail: 'already connected' }] };
+      }
+      if (platform?.gate) {
+        const gate = await platform.gate(
+          {
+            action: 'agent.recover',
+            resourceType: 'server',
+            resourceId: serverId,
+            approvalId,
+            binding: sha256Hex(canonical({ type: 'agent.recover', serverId })),
+            reason: reason ?? 'Recover offline exec agent over SSH',
+            impact: 'Restart the NodeTeam exec agent (systemd or PM2) on the server',
+            rollbackPlan: 'Stop the agent unit or PM2 process if the restart is unwanted',
+          },
+          actor,
+        );
+        if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
+      }
+      if (!serverAccessService?.runRemote) throw new AppError(500, 'SSH_UNAVAILABLE', 'Server access is not wired');
+      const res = await serverAccessService.runRemote(serverId, ({ run }) =>
+        run(RECOVER_SCRIPT, { timeoutMs: 90_000, maxBytes: 64 * 1024 }),
+      );
+      if (res.timedOut) throw new AppError(504, 'AGENT_RECOVER_TIMEOUT', 'Agent recovery over SSH timed out');
+      const parsed = parseRecoverOutput(res.stdout);
+      if (!parsed) {
+        await audit({
+          actorId: actor.id,
+          action: 'agent.recover',
+          resourceType: 'server',
+          resourceId: serverId,
+          result: 'failure',
+          metadata: { failure: 'watchdog-failed', stderr: String(res.stderr ?? '').slice(0, 400) },
+        });
+        throw new AppError(502, 'AGENT_RECOVER_FAILED', 'Recovery script returned no usable result');
+      }
+      let connected = Boolean(hub?.isConnected(agent.agentPublicId));
+      if (parsed.ok && !connected && connectWaitMs > 0) {
+        const deadline = now() + connectWaitMs;
+        while (now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1000));
+          if (hub?.isConnected(agent.agentPublicId)) {
+            connected = true;
+            break;
+          }
+        }
+      }
+      await audit({
+        actorId: actor.id,
+        action: 'agent.recover',
+        resourceType: 'server',
+        resourceId: serverId,
+        result: parsed.ok ? 'success' : 'failure',
+        metadata: {
+          method: parsed.method ?? null,
+          failure: parsed.failure ?? null,
+          connected,
+          steps: parsed.steps ?? [],
+        },
+      });
+      realtime?.publish(`server:${serverId}`, 'agent.state', { connected, recovering: false });
+      return {
+        ok: Boolean(parsed.ok),
+        failure: parsed.failure,
+        error: parsed.error,
+        method: parsed.method,
+        steps: parsed.steps ?? [],
+        connected,
+      };
     },
 
     /** Called by the hub on socket connect (after credential auth). */

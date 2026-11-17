@@ -21,5 +21,9 @@ export function createAgentGatewayController(service) {
       const out = await service.setTerminal(req.validated.params.id, req.validated.body, req.user);
       res.status(out.approvalRequired ? 202 : 201).json({ data: out });
     },
+    async recover(req, res) {
+      const out = await service.recoverAgent(req.validated.params.id, req.validated.body ?? {}, req.user);
+      res.status(out.approvalRequired ? 202 : 200).json({ data: out });
+    },
   };
 }

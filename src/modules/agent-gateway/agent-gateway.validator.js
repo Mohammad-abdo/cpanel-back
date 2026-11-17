@@ -87,3 +87,9 @@ export const historyQuerySchema = z
 
 export const rotateBodySchema = z.object({ approvalId: z.string().uuid().optional(), reason: z.string().trim().min(3).max(500).optional() }).strict();
 export const terminalBodySchema = z.object({ enabled: z.boolean(), approvalId: z.string().uuid().optional(), reason: z.string().trim().min(3).max(500).optional() }).strict();
+export const recoverBodySchema = z
+  .object({
+    approvalId: z.string().uuid().optional(),
+    reason: z.string().trim().min(3).max(500).optional(),
+  })
+  .strict();

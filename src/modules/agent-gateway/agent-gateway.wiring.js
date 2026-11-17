@@ -1,5 +1,6 @@
 import { prisma } from '../../config/prisma.js';
 import { getDeps } from '../platform/platform.wiring.js';
+import { serverAccessService } from '../server-access/server-access.routes.js';
 import { createAgentGatewayService } from './agent-gateway.service.js';
 import { hubRef } from './agent-gateway.hub.js';
 import { realtime } from './agent-gateway.realtime.js';
@@ -14,6 +15,7 @@ export function getAgentGatewayService() {
       auditService,
       platform,
       realtime,
+      serverAccessService,
       hub: {
         get available() {
           return hubRef.current?.available === true;

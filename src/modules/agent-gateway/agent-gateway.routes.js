@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { validate } from '../../common/middleware/validate.js';
 import { requireSession } from '../../common/middleware/require-session.js';
-import { historyQuerySchema, rotateBodySchema, sendCommandBodySchema, serverIdParamsSchema, terminalBodySchema } from './agent-gateway.validator.js';
+import {
+  historyQuerySchema,
+  recoverBodySchema,
+  rotateBodySchema,
+  sendCommandBodySchema,
+  serverIdParamsSchema,
+  terminalBodySchema,
+} from './agent-gateway.validator.js';
 import { createAgentGatewayController } from './agent-gateway.controller.js';
 import { getAgentGatewayService } from './agent-gateway.wiring.js';
 
@@ -18,3 +25,4 @@ agentGatewayRouter.get('/:id/agent/commands', mfa, validate(serverIdParamsSchema
 agentGatewayRouter.post('/:id/agent/commands', mfa, validate(serverIdParamsSchema, 'params'), validate(sendCommandBodySchema, 'body'), run('send'));
 agentGatewayRouter.post('/:id/agent/rotate', mfa, validate(serverIdParamsSchema, 'params'), validate(rotateBodySchema, 'body'), run('rotate'));
 agentGatewayRouter.post('/:id/agent/terminal', mfa, validate(serverIdParamsSchema, 'params'), validate(terminalBodySchema, 'body'), run('terminal'));
+agentGatewayRouter.post('/:id/agent/recover', mfa, validate(serverIdParamsSchema, 'params'), validate(recoverBodySchema, 'body'), run('recover'));

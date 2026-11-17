@@ -8,6 +8,7 @@ import { verifyUpdateManifest } from '../../../agents/exec-agent/src/update.js';
 import { createAgentGatewayService } from '../src/modules/agent-gateway/agent-gateway.service.js';
 import { createAgentsService } from '../src/modules/agents/agents.service.js';
 import { createHub, attachAgentGateway } from '../src/modules/agent-gateway/agent-gateway.hub.js';
+import { parseRecoverOutput } from '../src/modules/agent-gateway/agent-gateway.recover.js';
 import { sendCommandBodySchema, COMMAND_ARGS } from '../src/modules/agent-gateway/agent-gateway.validator.js';
 import { createQueueDriver, createBullmqDriver, parseQueueConfig } from '../../worker/src/queue-driver.js';
 
@@ -263,6 +264,34 @@ describe('agent gateway service', () => {
     const off = await s.svc.setTerminal(SID, { enabled: false }, owner);
     expect(off.status).toBe('sent');
     expect(s.sent[0].type).toBe('agent.terminal');
+  });
+
+  it('recover: no-op when connected; gates when offline; runs SSH script via serverAccess', async () => {
+    expect(parseRecoverOutput('noise\n{"ok":true,"method":"systemd","steps":[]}\n')).toMatchObject({ ok: true, method: 'systemd' });
+    const connected = setup();
+    expect(await connected.svc.recoverAgent(SID, {}, owner)).toMatchObject({ ok: true, alreadyConnected: true });
+
+    const blocked = setup({
+      platform: { gate: vi.fn().mockResolvedValue({ proceed: false, approval: { id: 'ap-r' } }) },
+      deps: { hub: { available: true, isConnected: () => false, send: vi.fn() } },
+    });
+    expect(await blocked.svc.recoverAgent(SID, {}, owner)).toMatchObject({ approvalRequired: true });
+
+    const run = vi.fn(async () => ({
+      stdout: '{"ok":true,"method":"systemd","unit":"nodeteam-agent","steps":[{"step":"systemd-start","ok":true,"detail":"started"}]}\n',
+      timedOut: false,
+    }));
+    const offline = setup({
+      deps: {
+        hub: { available: true, isConnected: () => false, send: vi.fn() },
+        serverAccessService: { runRemote: vi.fn(async (_id, fn) => fn({ run })) },
+        connectWaitMs: 0,
+      },
+    });
+    const out = await offline.svc.recoverAgent(SID, { reason: 'bring agent back' }, owner);
+    expect(out).toMatchObject({ ok: true, method: 'systemd', connected: false });
+    expect(run).toHaveBeenCalled();
+    expect(offline.auditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'agent.recover', result: 'success' }));
   });
 });
 
