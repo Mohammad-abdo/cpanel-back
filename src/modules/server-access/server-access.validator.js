@@ -55,6 +55,18 @@ export const pm2BodySchema = z
   })
   .strict();
 
+/** Interactive SSH terminal ticket (Critical). Body may be empty on first request; reason defaults in the service. */
+export const terminalTicketBodySchema = z.preprocess(
+  (b) => b ?? {},
+  z
+    .object({
+      reason: z.string().min(5).max(500).optional(),
+      rollbackNote: z.string().min(5).max(500).optional(),
+      approvalId: z.string().uuid().optional(),
+    })
+    .strict(),
+);
+
 /** Import selection after a scan. Empty arrays mean "skip that kind"; omit a key to import all of that kind from the latest scan payload embedded in the request. */
 export const inventoryImportBodySchema = z
   .object({

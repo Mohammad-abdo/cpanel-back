@@ -22,6 +22,7 @@ import {
   serverIdParamsSchema,
   serviceBodySchema,
   pm2BodySchema,
+  terminalTicketBodySchema,
   writeBodySchema,
   inventoryImportBodySchema,
 } from './server-access.validator.js';
@@ -70,6 +71,6 @@ serverAccessRouter.post('/:id/files/mkdir', owner, params, validate(mkdirBodySch
 serverAccessRouter.post('/:id/files/rename', owner, params, validate(renameBodySchema, 'body'), wrap(c.rename));
 serverAccessRouter.delete('/:id/files', owner, params, validate(deleteQuerySchema, 'query'), wrap(c.remove));
 
-serverAccessRouter.post('/:id/terminal/ticket', owner, params, wrap(c.ticket));
+serverAccessRouter.post('/:id/terminal/ticket', owner, params, validate(terminalTicketBodySchema, 'body'), wrap(c.ticket));
 serverAccessRouter.post('/:id/inventory/scan', owner, params, wrap(c.scanInventory));
 serverAccessRouter.post('/:id/inventory/import', owner, params, validate(inventoryImportBodySchema, 'body'), wrap(c.importInventory));

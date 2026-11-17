@@ -23,6 +23,8 @@ export const ACTION_RISK = Object.freeze({
   'pm2.restart': RISK.HIGH,
   'pm2.reload': RISK.HIGH,
   'pm2.delete': RISK.HIGH,
+  // Interactive SSH PTY: Critical — full shell on the server; per-session approval.
+  'server.terminal.open': RISK.CRITICAL,
   // Phase 10 mail (TASK-034/035): apply is closed by default; firewall exposure is critical.
   'mail.provision.apply': RISK.HIGH,
   'mail.firewall.open': RISK.CRITICAL,

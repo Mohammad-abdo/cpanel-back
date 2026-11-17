@@ -1471,14 +1471,43 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     },
 
     // ---- terminal ----------------------------------------------------------------------------
-    /** One-time ticket for the terminal WebSocket (browsers cannot send an Authorization header). */
-    async createTicket(serverId, actor) {
+    /**
+     * One-time ticket for the terminal WebSocket (browsers cannot send Authorization).
+     * Critical gate: reason + rollback note, then approvalId replay. Ticket TTL stays short (TICKET_TTL_MS).
+     */
+    async createTicket(serverId, { reason, rollbackNote, approvalId } = {}, actor) {
       requireOwner(actor);
       await loadCredential(serverId);
+      if (!platform?.gate) throw new AppError(500, 'GATE_UNAVAILABLE', 'Approval service is not wired');
+      const gate = await platform.gate(
+        {
+          action: 'server.terminal.open',
+          binding: serverId,
+          resourceType: 'server',
+          resourceId: serverId,
+          approvalId,
+          reason: reason ?? 'Open interactive SSH terminal',
+          impact: [
+            'Opens an interactive shell on this server for the Owner session',
+            'Keystrokes are audited; passwords after a password prompt are redacted',
+            `Session idle timeout 30 minutes; ticket valid ~${Math.round(TICKET_TTL_MS / 1000)}s`,
+          ],
+          rollbackPlan: rollbackNote ?? 'Close the terminal tab; revoke Owner MFA session if needed',
+        },
+        actor,
+      );
+      if (!gate.proceed) return { approvalRequired: true, approval: gate.approval };
       for (const [k, t] of tickets) if (t.expiresAt <= now().getTime()) tickets.delete(k);
       const ticket = randomBytes(32).toString('base64url');
       const expiresAt = now().getTime() + TICKET_TTL_MS;
       tickets.set(sha(ticket), { serverId, actorId: actor.id, expiresAt });
+      await audit({
+        actorId: actor.id,
+        action: 'server.terminal.ticket',
+        resourceId: serverId,
+        result: 'success',
+        metadata: { approvalId: gate.approval?.id ?? approvalId ?? null },
+      });
       return { ticket, expiresAt: new Date(expiresAt).toISOString() };
     },
 
