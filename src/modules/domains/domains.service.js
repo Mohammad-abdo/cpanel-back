@@ -33,7 +33,18 @@ export function validateDnsRecord(domainName, { type, name, value }) {
   if (type === 'TXT' && value.length > 512) throw new AppError(422, 'DNS_VALUE_INVALID', 'TXT value too long');
 }
 
-export function createDomainsService({ prisma, now = () => new Date(), auditService = null, rbac = null, platform = null, adapters = null }) {
+export function createDomainsService({
+  prisma,
+  now = () => new Date(),
+  auditService = null,
+  rbac = null,
+  platform = null,
+  adapters = null,
+  /** Optional SSH script runner (Caddy apply + webserver probe). */
+  scriptRunner = null,
+  /** Injectable env for CADDY_MODE (defaults to process.env). */
+  env = process.env,
+}) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
   const scope = createScope({ prisma, now });
 
