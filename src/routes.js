@@ -42,6 +42,7 @@ import { alertChannelsRouter } from './modules/alert-channels/alert-channels.rou
 import { previewsRouter } from './modules/previews/previews.routes.js';
 import { rootDomainsRouter } from './modules/root-domains/root-domains.routes.js';
 import { githubRouter } from './modules/github/github.routes.js';
+import { uptimeRouter } from './modules/uptime/uptime.routes.js';
 
 export const apiRouter = Router();
 
@@ -73,6 +74,7 @@ apiRouter.use('/deployments', deploymentsRouter);
 apiRouter.use('/backups', backupsRouter);
 apiRouter.use('/root-domains', rootDomainsRouter);
 apiRouter.use('/github', githubRouter);
+apiRouter.use('/uptime', uptimeRouter);
 apiRouter.use('/domains', domainsRouter);
 apiRouter.use('/domains', mailDomainRouter);
 apiRouter.use('/mailboxes', mailboxesRouter);

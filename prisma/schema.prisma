@@ -342,6 +342,7 @@ model Project {
   logSources   LogSource[]
   errorGroups  ErrorGroup[]
   activityEvents ActivityEvent[]    @relation("ActivityProject")
+  uptimeMonitors UptimeMonitor[]
 
   @@unique([serverId, slug])
   @@index([status])
@@ -1482,6 +1483,53 @@ model PreviewEnvironment {
 // ---------------------------------------------------------------------------
 // TASK-044 extension — platform GitHub App credentials (single-row control plane).
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Uptime monitors — HTTP(S) reachability checks (additive).
+// ---------------------------------------------------------------------------
+
+model UptimeMonitor {
+  id                 String    @id @default(uuid())
+  projectId          String?
+  name               String    @db.VarChar(100)
+  url                String    @db.VarChar(2000)
+  method             String    @default("GET") @db.VarChar(8)
+  intervalSec        Int       @default(60)
+  timeoutMs          Int       @default(10000)
+  expectedStatus     String    @default("200-399") @db.VarChar(50)
+  keyword            String?   @db.VarChar(200)
+  failureThreshold   Int       @default(2)
+  enabled            Boolean   @default(true)
+  status             String    @default("unknown") @db.VarChar(16)
+  lastCheckedAt      DateTime?
+  lastStatusCode     Int?
+  lastResponseMs     Int?
+  lastError          String?   @db.VarChar(300)
+  consecutiveFailures Int      @default(0)
+  failingSince       DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  project Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  checks  UptimeCheck[]
+
+  @@index([projectId])
+  @@index([enabled, status])
+}
+
+model UptimeCheck {
+  id         String   @id @default(uuid())
+  monitorId  String
+  checkedAt  DateTime
+  ok         Boolean
+  statusCode Int?
+  responseMs Int?
+  error      String?  @db.VarChar(300)
+
+  monitor UptimeMonitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+
+  @@index([monitorId, checkedAt])
+}
 
 /// Owner-managed GitHub App installation credentials. Private key and webhook secret are encrypted at rest and never returned.
 model GitHubAppConfig {
