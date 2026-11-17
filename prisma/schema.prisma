@@ -251,6 +251,7 @@ model Server {
   activityEvents ActivityEvent[] @relation("ActivityServer")
   mailService ServerMailService?
   cronJobs    CronJob[]
+  portReservations PortReservation[]
 
   @@index([status])
 }
@@ -300,6 +301,22 @@ model ServerPort {
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
   @@unique([serverId, port, proto])
+}
+
+/// Manual hold on a host port (vercel-clone port_reservations parity). Never suggested as free.
+model PortReservation {
+  id        String   @id @default(uuid())
+  serverId  String
+  port      Int
+  label     String   @db.VarChar(100)
+  createdById String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, port])
+  @@index([serverId])
 }
 
 model ServerSnapshot {

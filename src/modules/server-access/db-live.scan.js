@@ -1,9 +1,60 @@
 /**
- * Live database browse over SSH (MySQL / Postgres) via CLI clients.
+ * Live database browse over SSH (MySQL / Postgres / MongoDB) via CLI clients.
  * Identifiers are validated before shell quoting — never interpolate raw user input.
  */
 
-export const SAFE_ENGINE = new Set(['mysql', 'postgres']);
+/** List databases via mongosh (JSON array of names). Password never goes on argv when auth is set. */
+export function mongoListDatabasesCmd(auth = null) {
+  const evalJs = `JSON.stringify(db.adminCommand({ listDatabases: 1 }).databases.map(d => d.name))`;
+  if (auth?.username) {
+    const user = assertSafeDbUser(auth.username);
+    const pass = String(auth.password ?? '');
+    return [
+      'ERRFILE=$(mktemp)',
+      `OUT=$(mongosh --quiet --username ${shQuote(user)} --password ${shQuote(pass)} --eval ${shQuote(evalJs)} 2>>"$ERRFILE"); EC=$?`,
+      'printf "%s" "$OUT"',
+      'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+      'rm -f "$ERRFILE"',
+      '[ -n "$OUT" ]',
+    ].join('; ');
+  }
+  return [
+    'ERRFILE=$(mktemp)',
+    `OUT=$(mongosh --quiet --eval ${shQuote(evalJs)} 2>>"$ERRFILE"); EC=$?`,
+    'printf "%s" "$OUT"',
+    'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+    'rm -f "$ERRFILE"',
+    '[ -n "$OUT" ]',
+  ].join('; ');
+}
+
+/** List collection names in one database. */
+export function mongoListCollectionsCmd(db, auth = null) {
+  const dbName = assertSafeDbName(db);
+  const evalJs = `JSON.stringify(db.getSiblingDB(${JSON.stringify(dbName)}).getCollectionNames())`;
+  if (auth?.username) {
+    const user = assertSafeDbUser(auth.username);
+    const pass = String(auth.password ?? '');
+    return [
+      'ERRFILE=$(mktemp)',
+      `OUT=$(mongosh --quiet --username ${shQuote(user)} --password ${shQuote(pass)} --eval ${shQuote(evalJs)} 2>>"$ERRFILE"); EC=$?`,
+      'printf "%s" "$OUT"',
+      'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+      'rm -f "$ERRFILE"',
+      '[ -n "$OUT" ]',
+    ].join('; ');
+  }
+  return [
+    'ERRFILE=$(mktemp)',
+    `OUT=$(mongosh --quiet --eval ${shQuote(evalJs)} 2>>"$ERRFILE"); EC=$?`,
+    'printf "%s" "$OUT"',
+    'if [ "$EC" -ne 0 ] || [ -z "$OUT" ]; then printf "\\n__NT_ERR__%s" "$(tr "\\n" "|" <"$ERRFILE" | cut -c1-400)" >&2; fi',
+    'rm -f "$ERRFILE"',
+    '[ -n "$OUT" ]',
+  ].join('; ');
+}
+
+export const SAFE_ENGINE = new Set(['mysql', 'postgres', 'mongodb']);
 export const SAFE_IDENT = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 export const SAFE_DB_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 export const SAFE_DB_USER = /^[A-Za-z0-9_./@-]{1,64}$/;

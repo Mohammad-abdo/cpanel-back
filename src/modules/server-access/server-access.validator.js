@@ -95,7 +95,7 @@ export const inventoryImportBodySchema = z
 export const dbEngineParamsSchema = z
   .object({
     id: z.string().uuid(),
-    engine: z.enum(['mysql', 'postgres']),
+    engine: z.enum(['mysql', 'postgres', 'mongodb']),
   })
   .strict();
 

@@ -14,7 +14,8 @@ const MAX_REDIRECTS = 5;
 const BODY_LIMIT = 1024 * 1024;
 const USER_AGENT = 'nodeteam-uptime/1.0';
 
-// Scheduled polling is not wired to apps/api/src/jobs yet; POST /uptime/:id/check runs checks on demand.
+const TICK_GRACE_MS = 500;
+const MAX_PARALLEL_CHECKS = 10;
 
 /** "200-399" or "200,204,301-302" into a matcher. */
 export function parseExpectedStatus(spec) {
@@ -182,7 +183,8 @@ export function createUptimeService({
   fetchImpl = globalThis.fetch,
   lookup,
   now = () => new Date(),
-}) {
+} = {}) {
+  const inFlight = new Set();
   const delegate = (name) => {
     const d = prisma?.[name];
     if (!d) throw schemaRequired();
@@ -349,11 +351,8 @@ export function createUptimeService({
       return { id, deleted: true };
     },
 
-    async checkNow(id, actor) {
-      requireActor(actor);
-      const monitor = await getRow(id);
+    async executeCheck(monitor, at = now()) {
       await isPublicHttpUrl(monitor.url, lookup ? { lookup } : {});
-      const at = now();
       const result = await performCheck(
         {
           url: monitor.url,
@@ -365,6 +364,38 @@ export function createUptimeService({
         { fetchImpl, ...(lookup ? { lookup } : {}) },
       );
       return recordCheck(monitor, result, at);
+    },
+
+    async checkNow(id, actor) {
+      requireActor(actor);
+      const monitor = await getRow(id);
+      return this.executeCheck(monitor);
+    },
+
+    /** Runs due enabled monitors (used by the in-process job scheduler). */
+    async tick(at = now()) {
+      const ts = at instanceof Date ? at.getTime() : Number(at);
+      const monitors = await guard(() => delegate('uptimeMonitor').findMany({ where: { enabled: true } }));
+      const due = monitors.filter((m) => {
+        if (inFlight.has(m.id)) return false;
+        if (!m.lastCheckedAt) return true;
+        return ts - m.lastCheckedAt.getTime() >= m.intervalSec * 1000 - TICK_GRACE_MS;
+      });
+      const room = Math.max(0, MAX_PARALLEL_CHECKS - inFlight.size);
+      await Promise.all(
+        due.slice(0, room).map(async (m) => {
+          inFlight.add(m.id);
+          try {
+            const fresh = await guard(() => delegate('uptimeMonitor').findUnique({ where: { id: m.id } }));
+            if (fresh?.enabled) await this.executeCheck(fresh, at instanceof Date ? at : new Date(ts));
+          } catch {
+            /* single monitor failure must not stop the tick */
+          } finally {
+            inFlight.delete(m.id);
+          }
+        }),
+      );
+      return { due: due.length, started: Math.min(due.length, room) };
     },
   };
 }

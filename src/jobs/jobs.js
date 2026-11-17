@@ -22,6 +22,7 @@ const DEFAULTS = {
   'deployments.sweepStuck': { env: 'NT_JOB_DEPLOY_SWEEP_MS', ms: 2 * MIN },
   'previews.cleanup': { env: 'NT_JOB_PREVIEW_CLEANUP_MS', ms: 10 * MIN },
   'certificates.probeLive': { env: 'NT_JOB_CERT_PROBE_MS', ms: 12 * HOUR },
+  'uptime.tick': { env: 'NT_JOB_UPTIME_MS', ms: 30_000 },
 };
 
 /** Minimum accepted interval: values below it (or non-numeric) fall back to the default. */
@@ -45,7 +46,7 @@ export function parseJobConfig(env = process.env) {
 }
 
 export function buildJobs(services, config) {
-  const { operations, alerts, reports, certificates, backups, prisma, security, accessReviews, alertChannels } = services;
+  const { operations, alerts, reports, certificates, backups, prisma, security, accessReviews, alertChannels, uptime } = services;
   const every = (name) => config.intervals[name];
   const jobs = [
     { name: 'operations.expireStale', intervalMs: every('operations.expireStale'), run: () => operations.expireStale() },
@@ -73,6 +74,9 @@ export function buildJobs(services, config) {
   }
   if (alertChannels) {
     jobs.push({ name: 'alertChannels.retryDue', intervalMs: every('alertChannels.retryDue'), run: ({ at } = {}) => alertChannels.retryDue(at ?? new Date()) });
+  }
+  if (uptime) {
+    jobs.push({ name: 'uptime.tick', intervalMs: every('uptime.tick'), run: ({ at } = {}) => uptime.tick(at ?? new Date()) });
   }
   if (services.deploymentSweeper) {
     jobs.push({ name: 'deployments.sweepStuck', intervalMs: every('deployments.sweepStuck'), run: () => services.deploymentSweeper.sweepStuck() });

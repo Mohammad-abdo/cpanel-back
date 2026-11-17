@@ -42,6 +42,7 @@ import { alertChannelsRouter } from './modules/alert-channels/alert-channels.rou
 import { previewsRouter } from './modules/previews/previews.routes.js';
 import { rootDomainsRouter } from './modules/root-domains/root-domains.routes.js';
 import { githubRouter } from './modules/github/github.routes.js';
+import { portsRouter } from './modules/ports/ports.routes.js';
 import { uptimeRouter } from './modules/uptime/uptime.routes.js';
 
 export const apiRouter = Router();
@@ -56,6 +57,7 @@ apiRouter.use('/operations', operationsRouter);
 apiRouter.use('/rbac', rbacRouter);
 apiRouter.use('/servers', serverAccessRouter);
 apiRouter.use('/servers', serversRouter);
+apiRouter.use('/servers', portsRouter);
 apiRouter.use('/servers', mailServerRouter);
 apiRouter.use('/servers', agentGatewayRouter);
 apiRouter.use('/servers', serverCleanupRouter);

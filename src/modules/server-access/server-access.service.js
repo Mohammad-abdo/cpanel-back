@@ -22,6 +22,8 @@ import {
   isMutatingSql,
   listSchemasSql,
   listTablesSql,
+  mongoListCollectionsCmd,
+  mongoListDatabasesCmd,
   mysqlAdminCmd,
   mysqlCmd,
   parseMysqlBatch,
@@ -862,12 +864,13 @@ export function createServerAccessService({ prisma, connector, auditService = nu
     },
 
     /**
-     * Live DB browse over SSH CLI (MySQL / Postgres). Owner MFA only.
+     * Live DB browse over SSH CLI (MySQL / Postgres / MongoDB). Owner MFA only.
      * action: schemas | tables | columns | rows | query
+     * MongoDB supports schemas (databases) and tables (collections) via mongosh; columns/rows/query stay SQL-only.
      */
     async dbBrowse(serverId, { engine, action, db, table, sql, limit, offset, auth = null }, actor) {
       requireOwner(actor);
-      if (!SAFE_ENGINE.has(engine)) throw new AppError(422, 'DB_ENGINE_INVALID', 'Engine must be mysql or postgres');
+      if (!SAFE_ENGINE.has(engine)) throw new AppError(422, 'DB_ENGINE_INVALID', 'Engine must be mysql, postgres, or mongodb');
       const login = auth?.username ? { username: auth.username, password: auth.password ?? '' } : null;
       return withSshLock(serverId, async () => {
         const cred = await loadCredential(serverId);
@@ -898,6 +901,41 @@ export function createServerAccessService({ prisma, connector, auditService = nu
             return stdout;
           };
           const parse = (text) => (engine === 'mysql' ? parseMysqlBatch(text) : parsePsqlAligned(text));
+
+          if (engine === 'mongodb') {
+            if (action === 'schemas') {
+              const text = await run(mongoListDatabasesCmd(login));
+              let names = [];
+              try {
+                names = JSON.parse(String(text).trim());
+              } catch {
+                names = String(text)
+                  .split('\n')
+                  .map((l) => l.trim())
+                  .filter(Boolean);
+              }
+              if (!Array.isArray(names)) names = [];
+              return {
+                engine,
+                schemas: names.filter((n) => typeof n === 'string' && n && n !== 'local' && n !== 'config'),
+                collectedAt: now().toISOString(),
+                usedLogin: Boolean(login),
+              };
+            }
+            if (action === 'tables') {
+              assertSafeDbName(db);
+              const text = await run(mongoListCollectionsCmd(db, login));
+              let names = [];
+              try {
+                names = JSON.parse(String(text).trim());
+              } catch {
+                names = [];
+              }
+              const tables = (Array.isArray(names) ? names : []).map((name) => ({ name, collection: name }));
+              return { engine, db, columns: ['name'], tables, collectedAt: now().toISOString(), usedLogin: Boolean(login) };
+            }
+            throw new AppError(422, 'DB_ACTION_UNSUPPORTED', 'MongoDB browse supports schemas and tables (collections) only');
+          }
 
           if (action === 'schemas') {
             const text = await run(

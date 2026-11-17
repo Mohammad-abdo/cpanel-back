@@ -6,6 +6,7 @@ import { resolveDeploymentAdapters } from '../modules/deployments/deployments.ss
 import { createDeploymentSweeper } from '../modules/deployments/deployments.sweeper.js';
 import { createAlertsService } from '../modules/monitoring/monitoring.alerts.js';
 import { createAlertChannelsService } from '../modules/alert-channels/alert-channels.service.js';
+import { createUptimeService } from '../modules/uptime/uptime.service.js';
 import { createReportsService } from '../modules/reports/reports.service.js';
 import { createCertificatesService } from '../modules/certificates/certificates.service.js';
 import { createBackupsService } from '../modules/backups/backups.service.js';
@@ -42,6 +43,7 @@ export function createDefaultServices() {
     previews: createPreviewsJobService(),
     certProbeEnabled: isCertProbeEnabled(),
     alertChannels: createAlertChannelsService({ prisma, auditService }),
+    uptime: createUptimeService({ prisma }),
     auditService,
   };
 }
