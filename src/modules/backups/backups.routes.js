@@ -7,6 +7,7 @@ import {
   listPoliciesQuerySchema,
   listRunsQuerySchema,
   offsiteBodySchema,
+  offsiteClearBodySchema,
   policyIdParamsSchema,
   retentionBodySchema,
   runBackupBodySchema,
@@ -38,4 +39,4 @@ backupsRouter.get('/runs', requireSession(), validate(listRunsQuerySchema, 'quer
 backupsRouter.post('/artifacts/:id/verify', write, validate(artifactIdParamsSchema, 'params'), validate(verifyBodySchema, 'body'), wrap(c.verifyArtifact));
 backupsRouter.get('/executor', requireSession(), wrap(c.executorStatus));
 backupsRouter.put('/offsite', write, validate(offsiteBodySchema, 'body'), wrap(c.setOffsite));
-backupsRouter.delete('/offsite', write, wrap(c.clearOffsite));
+backupsRouter.delete('/offsite', write, validate(offsiteClearBodySchema, 'body'), wrap(c.clearOffsite));

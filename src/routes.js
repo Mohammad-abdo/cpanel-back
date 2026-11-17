@@ -39,6 +39,7 @@ import { serverCleanupRouter } from './modules/server-cleanup/server-cleanup.rou
 import { webhooksRouter } from './modules/webhooks/webhooks.routes.js';
 import { deploySettingsRouter } from './modules/webhooks/webhooks.routes.js';
 import { alertChannelsRouter } from './modules/alert-channels/alert-channels.routes.js';
+import { previewsRouter } from './modules/previews/previews.routes.js';
 import { rootDomainsRouter } from './modules/root-domains/root-domains.routes.js';
 
 export const apiRouter = Router();
@@ -60,6 +61,7 @@ apiRouter.use('/projects', cronRouter);
 apiRouter.use('/projects', projectEnvRouter);
 apiRouter.use('/projects', projectsRouter);
 apiRouter.use('/projects', deploySettingsRouter);
+apiRouter.use('/projects', previewsRouter);
 apiRouter.use('/webhooks', webhooksRouter);
 apiRouter.use('/monitoring', monitoringRouter);
 apiRouter.use('/monitoring', alertsRouter);

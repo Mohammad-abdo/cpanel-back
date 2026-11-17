@@ -35,6 +35,8 @@ export function createWebhooksService({
   prisma,
   auditService = null,
   deploymentsService = null,
+  /** TASK-045: when set and enabled for the project, pull_request deliveries create/update/destroy preview environments. */
+  previews = null,
   platform = null,
   now = () => new Date(),
   credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
@@ -158,6 +160,17 @@ export function createWebhooksService({
       if (event === 'ping') {
         if (!(await record('pong'))) return { accepted: false, replayed: true };
         return { accepted: false, pong: true };
+      }
+
+      // TASK-045: preview environments take over pull_request events for projects that enabled them.
+      if (event === 'pull_request' && previews && (await previews.enabledFor(projectId))) {
+        const previewActor = await actorFor(matched.cfg.actorUserId);
+        if (!previewActor) {
+          await record('ignored');
+          return { accepted: false, ignored: 'acting user unavailable' };
+        }
+        if (!(await record('accepted'))) return { accepted: false, replayed: true };
+        return previews.handlePullRequest({ projectId, payload, actor: previewActor });
       }
 
       // Resolve what to deploy.

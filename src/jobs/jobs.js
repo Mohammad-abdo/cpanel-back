@@ -20,6 +20,8 @@ const DEFAULTS = {
   'security.sync': { env: 'NT_JOB_SECURITY_SYNC_MS', ms: 15 * MIN },
   'accessReviews.startDue': { env: 'NT_JOB_ACCESS_REVIEW_MS', ms: 24 * HOUR },
   'deployments.sweepStuck': { env: 'NT_JOB_DEPLOY_SWEEP_MS', ms: 2 * MIN },
+  'previews.cleanup': { env: 'NT_JOB_PREVIEW_CLEANUP_MS', ms: 10 * MIN },
+  'certificates.probeLive': { env: 'NT_JOB_CERT_PROBE_MS', ms: 12 * HOUR },
 };
 
 /** Minimum accepted interval: values below it (or non-numeric) fall back to the default. */
@@ -74,6 +76,13 @@ export function buildJobs(services, config) {
   }
   if (services.deploymentSweeper) {
     jobs.push({ name: 'deployments.sweepStuck', intervalMs: every('deployments.sweepStuck'), run: () => services.deploymentSweeper.sweepStuck() });
+  }
+  if (services.previews) {
+    jobs.push({ name: 'previews.cleanup', intervalMs: every('previews.cleanup'), run: ({ at } = {}) => services.previews.cleanupExpired(at ?? new Date()) });
+  }
+  // Opt-in (CERT_EXPIRY_PROBE=1): opens TLS connections to registered domains.
+  if (services.certProbeEnabled) {
+    jobs.push({ name: 'certificates.probeLive', intervalMs: every('certificates.probeLive'), run: () => certificates.scanLive() });
   }
   if (accessReviews && config.accessReviewEveryDays > 0) {
     jobs.push({

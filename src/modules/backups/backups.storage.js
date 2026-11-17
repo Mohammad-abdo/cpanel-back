@@ -194,8 +194,8 @@ export function createStorageRouter({ local, resolveOffsite = () => null, legacy
     },
     target: active,
     upload: (a) => active().upload(a),
-    download: (a) => byRef(a.locationRef).download(a),
-    remove: (a) => byRef(a.locationRef).remove(a),
+    download: async (a) => byRef(a.locationRef).download(a),
+    remove: async (a) => byRef(a.locationRef).remove(a),
     health: () => active().health(),
   };
 }

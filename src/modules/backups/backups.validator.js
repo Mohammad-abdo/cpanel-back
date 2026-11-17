@@ -44,7 +44,8 @@ export const retentionBodySchema = z
   })
   .strict();
 
-export const verifyBodySchema = z.object({ environmentId: z.string().uuid().optional(), testRestore: z.boolean().optional() }).strict();
+/** Body is optional (Express 5 leaves req.body undefined when the client sends none). */
+export const verifyBodySchema = z.preprocess((b) => b ?? {}, z.object({ environmentId: z.string().uuid().optional(), testRestore: z.boolean().optional() }).strict());
 
 /** Offsite S3-compatible target. secretAccessKey may be omitted on update to keep the stored one. */
 export const offsiteBodySchema = z
@@ -58,3 +59,5 @@ export const offsiteBodySchema = z
     enabled: z.boolean().default(false),
   })
   .strict();
+
+export const offsiteClearBodySchema = z.preprocess((b) => b ?? {}, z.object({}).strict());

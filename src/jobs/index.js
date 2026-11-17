@@ -16,6 +16,7 @@ import { getDeps } from '../modules/platform/platform.wiring.js';
 import { logsService } from '../modules/logs/logs.routes.js';
 import { serverAccessService } from '../modules/server-access/server-access.routes.js';
 import { getBackupRuntime } from '../modules/backups/backups.wiring.js';
+import { createPreviewsJobService, isCertProbeEnabled } from '../modules/previews/previews.wiring.js';
 import { createScheduler } from './scheduler.js';
 import { buildJobs, parseJobConfig } from './jobs.js';
 
@@ -38,6 +39,8 @@ export function createDefaultServices() {
     security: createSecurityService({ ...deps, incidents: createIncidentsService(deps) }),
     accessReviews: createAccessReviewsService(deps),
     deploymentSweeper: createDeploymentSweeper({ prisma, auditService }),
+    previews: createPreviewsJobService(),
+    certProbeEnabled: isCertProbeEnabled(),
     alertChannels: createAlertChannelsService({ prisma, auditService }),
     auditService,
   };
