@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AppError } from '../../common/errors/app-error.js';
+import { deriveAgentKeys } from '../agent-gateway/agent-gateway.protocol.js';
 
 const sha = (v) => createHash('sha256').update(v).digest('hex');
 
@@ -18,7 +19,7 @@ export function statusFromSummary({ cpuPercent, memPercent, diskPercent }) {
  * INTERIM: agents authenticate with a secret key issued once at enrollment (its hash is stored in
  * certFingerprint). Real mTLS certificates need infrastructure and stay REQUIRES DECISION; this is not mTLS.
  */
-export function createAgentsService({ prisma, now = () => new Date(), auditService = null }) {
+export function createAgentsService({ prisma, now = () => new Date(), auditService = null, controlSecret = process.env.AGENT_CONTROL_SECRET }) {
   const audit = (event) => (auditService?.record ? auditService.record(event) : null);
 
   return {
@@ -63,7 +64,15 @@ export function createAgentsService({ prisma, now = () => new Date(), auditServi
         result: 'success',
         after: { agentPublicId },
       });
-      return { agentId: agentPublicId, agentKey, serverId: enrollment.serverId };
+      // TASK-046: per-agent command keys (HKDF from AGENT_CONTROL_SECRET) are issued once, over TLS, at enrollment.
+      // Omitted when the control secret is not configured (the agent then cannot receive commands).
+      const keys = controlSecret && controlSecret.length >= 32 ? deriveAgentKeys(controlSecret, agentPublicId, 1) : null;
+      return {
+        agentId: agentPublicId,
+        agentKey,
+        serverId: enrollment.serverId,
+        ...(keys ? { generation: 1, signKeyB64: keys.signKey.toString('base64url'), encKeyB64: keys.encKey.toString('base64url') } : {}),
+      };
     },
 
     /** Resolve "Agent <agentId>.<key>" credentials; throws on any mismatch. */

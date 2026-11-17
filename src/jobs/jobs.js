@@ -13,11 +13,13 @@ const DEFAULTS = {
   'operations.expireStale': { env: 'NT_JOB_OPS_EXPIRE_MS', ms: 5 * MIN },
   'alerts.evaluateAll': { env: 'NT_JOB_ALERT_EVAL_MS', ms: 1 * MIN },
   'alerts.escalateDue': { env: 'NT_JOB_ALERT_ESCALATE_MS', ms: 5 * MIN },
+  'alertChannels.retryDue': { env: 'NT_JOB_ALERT_CHANNEL_RETRY_MS', ms: 30_000 },
   'reports.runDue': { env: 'NT_JOB_REPORTS_MS', ms: 1 * MIN },
   'certificates.scanExpiry': { env: 'NT_JOB_CERT_SCAN_MS', ms: 6 * HOUR },
   'backups.planRetention': { env: 'NT_JOB_RETENTION_MS', ms: 24 * HOUR },
   'security.sync': { env: 'NT_JOB_SECURITY_SYNC_MS', ms: 15 * MIN },
   'accessReviews.startDue': { env: 'NT_JOB_ACCESS_REVIEW_MS', ms: 24 * HOUR },
+  'deployments.sweepStuck': { env: 'NT_JOB_DEPLOY_SWEEP_MS', ms: 2 * MIN },
 };
 
 /** Minimum accepted interval: values below it (or non-numeric) fall back to the default. */
@@ -41,7 +43,7 @@ export function parseJobConfig(env = process.env) {
 }
 
 export function buildJobs(services, config) {
-  const { operations, alerts, reports, certificates, backups, prisma, security, accessReviews } = services;
+  const { operations, alerts, reports, certificates, backups, prisma, security, accessReviews, alertChannels } = services;
   const every = (name) => config.intervals[name];
   const jobs = [
     { name: 'operations.expireStale', intervalMs: every('operations.expireStale'), run: () => operations.expireStale() },
@@ -66,6 +68,12 @@ export function buildJobs(services, config) {
   if (security) {
     const actor = config.securitySyncActorId ? { id: config.securitySyncActorId, isOwner: true } : SYSTEM_ACTOR;
     jobs.push({ name: 'security.sync', intervalMs: every('security.sync'), run: () => security.sync({ sinceMinutes: 60 }, actor) });
+  }
+  if (alertChannels) {
+    jobs.push({ name: 'alertChannels.retryDue', intervalMs: every('alertChannels.retryDue'), run: ({ at } = {}) => alertChannels.retryDue(at ?? new Date()) });
+  }
+  if (services.deploymentSweeper) {
+    jobs.push({ name: 'deployments.sweepStuck', intervalMs: every('deployments.sweepStuck'), run: () => services.deploymentSweeper.sweepStuck() });
   }
   if (accessReviews && config.accessReviewEveryDays > 0) {
     jobs.push({

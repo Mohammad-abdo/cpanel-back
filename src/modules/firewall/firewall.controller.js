@@ -8,6 +8,9 @@ export function createFirewallController(svc) {
     async rules(req, res) {
       res.status(200).json({ data: await svc.rules(req.validated.params.serverId, req.user) });
     },
+    async state(req, res) {
+      res.status(200).json({ data: await svc.state(req.validated.params.serverId, req.user) });
+    },
     async preview(req, res) {
       res.status(200).json({ data: await svc.preview(req.validated.params.serverId, req.validated.body, req.user) });
     },

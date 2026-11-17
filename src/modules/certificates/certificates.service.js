@@ -2,6 +2,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import { createScope } from '../../common/scope.js';
 import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
+import { notifyChannels } from '../notifications/notifications.service.js';
 
 export const RENEW_WINDOW_DAYS = 30;
 const DAY = 86400000;
@@ -58,8 +59,11 @@ export function createCertificatesService({ prisma, now = () => new Date(), audi
         if (state === 'expired') {
           if (c.status !== 'expired') await prisma.sslCertificate.update({ where: { id: c.id }, data: { status: 'expired' } });
           out.expired.push(c.id);
-        } else if (state === 'expiring') out.expiring.push(c.id);
-        else if (state === 'valid') out.valid += 1;
+          if (c.status !== 'expired') notifyChannels({ type: 'certificate.expiring', severity: 'critical', title: 'Certificate has expired', resourceType: 'certificate', resourceId: c.id, dedupeKey: `certificate.expired:${c.id}` }, { prisma });
+        } else if (state === 'expiring') {
+          out.expiring.push(c.id);
+          notifyChannels({ type: 'certificate.expiring', severity: 'warning', title: 'Certificate is expiring soon', resourceType: 'certificate', resourceId: c.id, dedupeKey: `certificate.expiring:${c.id}` }, { prisma });
+        } else if (state === 'valid') out.valid += 1;
       }
       return out;
     },

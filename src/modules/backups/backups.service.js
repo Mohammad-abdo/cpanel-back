@@ -4,6 +4,7 @@ import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { decrypt, encrypt, sha256 } from '../platform/platform.crypto.js';
 import { SYSTEM_ACTOR, isSystemActor } from '../../common/system-actor.js';
+import { notifyChannels } from '../notifications/notifications.service.js';
 
 /** Scheduled -> Queued -> Snapshot/Dump -> Encrypt -> Upload -> Verify -> Retain (required.md section 11). */
 export const BACKUP_TRANSITIONS = Object.freeze({
@@ -350,6 +351,7 @@ export function createBackupsService({
           await prisma.backupRun.update({ where: { id: run.id }, data: { status: 'failed', finishedAt: now(), verificationStatus: 'failed' } });
         }
         await audit({ actorId: actor.id ?? null, action: 'backup.run', resourceType: 'backup_policy', resourceId: policyId, environmentId: input.environmentId, result: 'failure', metadata: { failedStage: failedFrom, code: err.code ?? 'ERROR' } });
+        notifyChannels({ type: 'backup.failed', severity: 'critical', title: `Backup failed during ${failedFrom}`, resourceType: 'backup_policy', resourceId: policyId, dedupeKey: `backup.failed:${policyId}` }, { prisma });
         throw err instanceof AppError ? err : new AppError(502, 'BACKUP_FAILED', `Backup failed during ${failedFrom}`);
       }
     },

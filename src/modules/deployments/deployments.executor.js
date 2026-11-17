@@ -3,6 +3,7 @@ import { SYSTEM_ACTOR } from '../../common/system-actor.js';
 import { redact } from '../audit/audit.service.js';
 import { createSimulatedExecutor } from '../operations/operations.executor.js';
 import { computeSharedImpact } from '../projects/projects.service.js';
+import { sharedDeployLocks } from './deployments.commands.js';
 
 /**
  * Runner port: the real implementation lives in the server Agent (git pull, build, pm2 reload).
@@ -42,6 +43,8 @@ export function createDeploymentExecutor({
   fallback = createSimulatedExecutor(),
   /** When set, runs an optional pre-deploy backup for the target env before Preparing. */
   backups = null,
+  /** Per project+environment lock; injectable for tests. */
+  locks = sharedDeployLocks,
 }) {
   async function setStatus(deployment, status) {
     deployment.status = status;
@@ -83,7 +86,9 @@ export function createDeploymentExecutor({
 
   async function healthPhase(deployment, job) {
     await setStatus(deployment, 'Health Check');
-    const checks = await prisma.healthCheck.findMany({ where: { projectId: deployment.projectId } });
+    const rows = await prisma.healthCheck.findMany({ where: { projectId: deployment.projectId } });
+    const synthetic = runner.syntheticChecks ? await Promise.resolve(runner.syntheticChecks(deployment)).catch(() => []) : [];
+    const checks = [...rows, ...synthetic];
     return step(deployment, job, 'Health Check', async () => {
       if (checks.length === 0) {
         return { ok: true, skipped: true, detail: { healthVerified: false, reason: 'no health checks configured' } };
@@ -98,7 +103,7 @@ export function createDeploymentExecutor({
           healthTimeoutMs,
         );
         results.push({ checkId: check.id, kind: check.kind, ok: Boolean(r.ok), ...(r.detail ?? {}) });
-        await prisma.healthCheck.update({ where: { id: check.id }, data: { status: r.ok ? 'healthy' : 'unhealthy' } });
+        if (check.id) await prisma.healthCheck.update({ where: { id: check.id }, data: { status: r.ok ? 'healthy' : 'unhealthy' } });
       }
       const ok = results.every((r) => r.ok);
       const detail = { healthVerified: true, results };
@@ -197,6 +202,7 @@ export function createDeploymentExecutor({
       return { result: 'FAILED', detail: { failedStep: 'Health Check', status: deployment.status } };
     }
     await setStatus(deployment, 'Success');
+    if (runner.finalize) await step(deployment, job, 'Cleanup', () => runner.finalize({ deployment, job }));
     return { result: 'OK', detail: { status: 'Success', healthVerified: health.detail?.healthVerified ?? false } };
   }
 
@@ -234,7 +240,17 @@ export function createDeploymentExecutor({
       if (deployment.status === 'Success' && job.action === 'deployment.run') {
         return { result: 'OK', detail: { skipped: 'already finished', status: deployment.status } };
       }
-      return job.action === 'deployment.rollback' ? runRollback(deployment, job) : runDeployment(deployment, job);
+      // One deployment at a time per project+environment (in-process; the service also rejects concurrent active rows).
+      const lockKey = `${deployment.projectId}:${deployment.environmentId}`;
+      const release = locks.tryAcquire(lockKey);
+      if (!release) {
+        return { result: 'FAILED', detail: { error: 'DEPLOY_LOCKED', note: 'Another deployment holds the project lock' } };
+      }
+      try {
+        return job.action === 'deployment.rollback' ? await runRollback(deployment, job) : await runDeployment(deployment, job);
+      } finally {
+        release();
+      }
     },
   };
 }

@@ -250,6 +250,7 @@ model Server {
   securityEvents SecurityEvent[]
   activityEvents ActivityEvent[] @relation("ActivityServer")
   mailService ServerMailService?
+  cronJobs    CronJob[]
 
   @@index([status])
 }
@@ -260,6 +261,10 @@ model ServerAgent {
   agentPublicId   String    @unique
   certFingerprint String
   capabilitiesJson Json?
+  // TASK-046: command-key generation (rotation bumps it), reported agent version, terminal approval flag.
+  keyGeneration   Int       @default(1)
+  agentVersion    String?
+  terminalEnabledAt DateTime?
   lastSeenAt      DateTime?
   revokedAt       DateTime?
   createdAt       DateTime  @default(now())
@@ -328,6 +333,7 @@ model Project {
   repository   ProjectRepository?
   members      ProjectMember[]
   teamLinks    ProjectTeam[]
+  cronJobs     CronJob[]
   deployments  Deployment[]
   domains      Domain[]
   managedDbs   ManagedDatabase[]
@@ -1051,6 +1057,27 @@ model NotificationPreference {
 
 // ─── Agent enrollment (TASK-008) ────────────────────────────
 
+// TASK-046: signed command envelopes sent to exec agents and their audited results.
+model AgentCommand {
+  id           String    @id @default(uuid())
+  serverId     String
+  agentPublicId String
+  type         String
+  argsHash     String
+  argsJson     Json?
+  status       String    @default("pending")
+  riskTier     String?
+  approvalId   String?
+  requestedBy  String?
+  expiresAt    DateTime
+  resultJson   Json?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([serverId, createdAt])
+  @@index([status])
+}
+
 model AgentEnrollment {
   id          String    @id @default(uuid())
   serverId    String
@@ -1230,4 +1257,145 @@ model MailboxAuditEvent {
   mailbox MailboxAccount @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
 
   @@index([mailboxId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11 (TASK-042) - outbound alert channels. Additive. secretEnc is AES-256-GCM ciphertext (bot token / webhook URL / HMAC secret); never returned.
+model AlertChannel {
+  id             String    @id @default(uuid())
+  name           String    @db.VarChar(120)
+  type           String    @db.VarChar(20)
+  secretEnc      Bytes     @db.Blob
+  configJson     Json?
+  minSeverity    String    @default("info") @db.VarChar(20)
+  eventKinds     Json?
+  enabled        Boolean   @default(true)
+  dedupeSeconds  Int       @default(300)
+  lastTestAt     DateTime?
+  lastTestStatus String?   @db.VarChar(20)
+  createdById    String?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  deliveries AlertChannelDelivery[]
+
+  @@index([enabled, archivedAt])
+}
+
+model AlertChannelDelivery {
+  id            String    @id @default(uuid())
+  channelId     String
+  eventKind     String    @db.VarChar(80)
+  severity      String    @default("info") @db.VarChar(20)
+  status        String    @default("pending") @db.VarChar(20)
+  attempt       Int       @default(0)
+  nextAttemptAt DateTime?
+  error         String?   @db.VarChar(500)
+  payloadJson   Json?
+  dedupeKey     String?   @db.VarChar(191)
+  sentAt        DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  channel AlertChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+  @@index([status, nextAttemptAt])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11 - TASK-044 GitHub webhooks and public deploy hooks. Additive; no relations to existing models.
+// ---------------------------------------------------------------------------
+
+/// Per-project GitHub webhook settings. The shared secret is AES-256-GCM encrypted and never returned.
+model ProjectWebhook {
+  id            String   @id @default(uuid())
+  projectId     String   @unique
+  secretEnc     Bytes?   @db.Blob
+  enabled       Boolean  @default(true)
+  /// {"main":"production","develop":"staging"}: branch name -> environment code.
+  branchMapJson Json?
+  /// Pull request base branch -> environment code (preview environments). Optional.
+  prMapJson     Json?
+  /// User whose RBAC and approvals govern deployments requested by this webhook.
+  actorUserId   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+/// Replay protection: one row per accepted GitHub delivery id.
+model WebhookDelivery {
+  id         String   @id @default(uuid())
+  deliveryId String   @unique @db.VarChar(100)
+  projectId  String?
+  event      String   @db.VarChar(40)
+  outcome    String   @db.VarChar(40)
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+/// Public deploy hook. Only the SHA-256 of the token is stored; the token is shown once at creation or rotation.
+model DeployHook {
+  id            String    @id @default(uuid())
+  projectId     String
+  environmentId String
+  label         String    @db.VarChar(80)
+  tokenHash     String    @unique @db.VarChar(64)
+  tokenPrefix   String    @db.VarChar(12)
+  createdById   String?
+  revokedAt     DateTime?
+  lastUsedAt    DateTime?
+  useCount      Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([projectId])
+}
+
+/// TASK-048 per-project cron jobs (Phase 11). Executed over SSH by the worker; custom commands are approval-gated.
+model CronJob {
+  id            String    @id @default(uuid())
+  projectId     String
+  serverId      String
+  name          String
+  schedule      String
+  commandKey    String?
+  customCommand String?   @db.Text
+  workDir       String
+  enabled       Boolean   @default(false)
+  timeoutSec    Int       @default(300)
+  nextRunAt     DateTime?
+  lastRunAt     DateTime?
+  lastStatus    String?
+  approvalId    String?
+  createdById   String?
+  archivedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  project Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  server  Server    @relation(fields: [serverId], references: [id], onDelete: Restrict)
+  runs    CronRun[]
+
+  @@index([projectId])
+  @@index([enabled, nextRunAt])
+}
+
+model CronRun {
+  id         String    @id @default(uuid())
+  jobId      String
+  status     String
+  trigger    String    @default("schedule")
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  exitCode   Int?
+  outputTail String?   @db.Text
+  actorId    String?
+
+  job CronJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, startedAt])
+  @@index([status, startedAt])
 }

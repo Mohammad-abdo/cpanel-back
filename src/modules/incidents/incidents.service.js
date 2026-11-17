@@ -3,7 +3,7 @@ import { assertCan } from '../platform/platform.service.js';
 import { PERM } from '../platform/platform.risk.js';
 import { sha256 } from '../platform/platform.crypto.js';
 import { createScope } from '../../common/scope.js';
-import { notify } from '../notifications/notifications.service.js';
+import { notify, notifyChannels } from '../notifications/notifications.service.js';
 
 /** Detected -> Triaged -> Assigned -> Investigating -> Contained -> Resolved -> Closed. Closed reopens only via reopen(). */
 export const INCIDENT_TRANSITIONS = Object.freeze({
@@ -77,6 +77,7 @@ export function createIncidentsService({ prisma, now = () => new Date(), auditSe
       await requireManager(actor);
       const inc = await prisma.securityIncident.create({ data: { status: 'detected', severity: input.severity, title: input.title, detectedAt: now() } });
       await audit({ actorId: actor.id, action: 'incident.create', resourceId: inc.id, result: 'success', after: { severity: input.severity, title: input.title } });
+      notifyChannels({ type: 'incident.created', severity: input.severity === 'critical' || input.severity === 'high' ? 'critical' : 'warning', title: `Incident: ${input.title}`, resourceType: 'incident', resourceId: inc.id }, { prisma });
       return inc;
     },
 

@@ -12,11 +12,13 @@ import { createOperationsService } from './operations.service.js';
 import { prisma } from '../../config/prisma.js';
 import { createAuditService } from '../audit/audit.service.js';
 import { createDeploymentExecutor } from '../deployments/deployments.executor.js';
+import { resolveDeploymentAdapters } from '../deployments/deployments.ssh-runner.js';
 
 const operationsService = createOperationsService({
   prisma,
   auditService: createAuditService({ prisma }),
-  executor: createDeploymentExecutor({ prisma }),
+  // DEPLOY_EXECUTOR=simulated (default) | ssh. ssh runs real git/build/pm2 over SSH and is NOT_RUN in this repo.
+  executor: createDeploymentExecutor({ prisma, ...resolveDeploymentAdapters({ prisma }) }),
 });
 const c = createOperationsController(operationsService);
 const mfa = requireSession({ requireMfa: true });

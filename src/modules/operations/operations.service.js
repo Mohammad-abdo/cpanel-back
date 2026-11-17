@@ -4,7 +4,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import { redact } from '../audit/audit.service.js';
 import { createRbacService } from '../rbac/rbac.service.js';
 import { createSimulatedExecutor } from './operations.executor.js';
-import { notify, notifyOwners } from '../notifications/notifications.service.js';
+import { notify, notifyOwners, notifyChannels } from '../notifications/notifications.service.js';
 
 const RISK_ORDER = ['low', 'medium', 'high', 'critical'];
 const TERMINAL = ['SUCCESS', 'FAILED', 'CANCELLED', 'DENIED', 'EXPIRED', 'TIMEOUT'];
@@ -396,6 +396,9 @@ export function createOperationsService({
         },
       });
       const updated = await prisma.operationJob.update({ where: { id: job.id }, data: { status } });
+      if (status === 'FAILED' && /deploy/i.test(String(job.action))) {
+        notifyChannels({ type: 'deployment.failed', severity: 'critical', title: `Deployment failed: ${job.action}`, resourceType: job.resourceType, resourceId: job.resourceId, dedupeKey: `deployment.failed:${job.id}` }, { prisma });
+      }
       await audit({
         actorId: actor?.id,
         action: 'operation.execute',

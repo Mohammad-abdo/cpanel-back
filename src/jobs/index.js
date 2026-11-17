@@ -2,7 +2,10 @@ import { prisma } from '../config/prisma.js';
 import { createAuditService } from '../modules/audit/audit.service.js';
 import { createOperationsService } from '../modules/operations/operations.service.js';
 import { createDeploymentExecutor } from '../modules/deployments/deployments.executor.js';
+import { resolveDeploymentAdapters } from '../modules/deployments/deployments.ssh-runner.js';
+import { createDeploymentSweeper } from '../modules/deployments/deployments.sweeper.js';
 import { createAlertsService } from '../modules/monitoring/monitoring.alerts.js';
+import { createAlertChannelsService } from '../modules/alert-channels/alert-channels.service.js';
 import { createReportsService } from '../modules/reports/reports.service.js';
 import { createCertificatesService } from '../modules/certificates/certificates.service.js';
 import { createBackupsService } from '../modules/backups/backups.service.js';
@@ -24,7 +27,7 @@ export function createDefaultServices() {
     operations: createOperationsService({
       prisma,
       auditService,
-      executor: createDeploymentExecutor({ prisma, backups }),
+      executor: createDeploymentExecutor({ prisma, backups, ...resolveDeploymentAdapters({ prisma }) }),
     }),
     alerts: createAlertsService({ prisma, auditService, store: logsService.store }),
     reports: createReportsService({ prisma, auditService }),
@@ -32,6 +35,8 @@ export function createDefaultServices() {
     backups,
     security: createSecurityService({ ...deps, incidents: createIncidentsService(deps) }),
     accessReviews: createAccessReviewsService(deps),
+    deploymentSweeper: createDeploymentSweeper({ prisma, auditService }),
+    alertChannels: createAlertChannelsService({ prisma, auditService }),
     auditService,
   };
 }

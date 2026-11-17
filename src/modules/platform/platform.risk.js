@@ -27,6 +27,21 @@ export const ACTION_RISK = Object.freeze({
   'mail.provision.apply': RISK.HIGH,
   'mail.firewall.open': RISK.CRITICAL,
   'mail.dns.publish': RISK.HIGH,
+  // TASK-046 exec agent typed commands (stats / file.list / file.read are low and ungated).
+  'agent.deploy.step': RISK.HIGH,
+  'agent.pm2.control': RISK.HIGH,
+  'agent.ufw': RISK.CRITICAL,
+  'agent.cron.run': RISK.HIGH,
+  'agent.backup.dump': RISK.HIGH,
+  'agent.service.restart': RISK.HIGH,
+  'agent.terminal': RISK.CRITICAL,
+  'agent.update': RISK.CRITICAL,
+  'agent.rotate': RISK.HIGH,
+  // Phase 11 (TASK-043/044): custom (non-allowlisted) build commands and webhook secret rotation.
+  'deploy.command.approve': RISK.HIGH,
+  // Phase 11 (TASK-048): custom cron commands and server cleanup apply.
+  'cron.custom.command': RISK.HIGH,
+  'server.cleanup.apply': RISK.HIGH,
 });
 
 export const requiresApproval = (action) => {

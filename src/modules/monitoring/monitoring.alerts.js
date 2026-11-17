@@ -127,7 +127,7 @@ export function createAlertsService({ prisma, now = () => new Date(), auditServi
           });
           await prisma.alertEvent.create({ data: { alertId: alert.id, fromStatus: null, toStatus: 'firing', at } });
           await notifyOwners(
-            { type: 'alert.opened', title: `Alert firing (${rule.severity})`, resourceType: 'alert', resourceId: alert.id },
+            { type: 'alert.opened', severity: rule.severity, title: `Alert firing (${rule.severity})`, resourceType: 'alert', resourceId: alert.id },
             { prisma },
           );
           await audit({

@@ -1,5 +1,6 @@
 import { AppError } from '../../common/errors/app-error.js';
 import { EVENT_KINDS, CHANNEL_TYPES } from './notifications.validator.js';
+import { dispatchAlertChannels } from '../alert-channels/alert-channels.dispatch.js';
 
 const SECRET_TEXT = /\b(pass(?:word)?|secret|token|api[-_]?key|authorization)\b\s*[:=]\s*\S+/gi;
 
@@ -36,8 +37,14 @@ export async function notify({ userId, type, title, body, resourceType, resource
   }
 }
 
+/** Outbound channels (Telegram/Slack/Discord/webhook, TASK-042). Fire-and-forget, never throws, never awaited. */
+export function notifyChannels(event, { prisma }) {
+  dispatchAlertChannels(event, { prisma });
+}
+
 /** Notify every active Owner (except `exceptUserId`). Same never-throw contract. */
 export async function notifyOwners(event, { prisma, exceptUserId = null }) {
+  if (event?.channels !== false) notifyChannels(event, { prisma });
   try {
     if (!prisma?.user?.findMany) return;
     const owners = await prisma.user.findMany({

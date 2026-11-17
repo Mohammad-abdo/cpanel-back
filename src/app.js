@@ -11,7 +11,7 @@ export function jsonReplacer(_key, value) {
 }
 
 /** Routes that parse their own larger bodies: server file editor/upload, project env vars bulk set/import. */
-const LARGE_BODY_ROUTE = /^\/api\/v1\/(servers\/[^/]+\/files\/(content|upload)|projects\/[^/]+\/environments\/[^/]+\/vars(\/import)?)$/;
+const LARGE_BODY_ROUTE = /^\/api\/v1\/(servers\/[^/]+\/files\/(content|upload)|webhooks\/github|projects\/[^/]+\/environments\/[^/]+\/vars(\/import)?)$/;
 
 export function createApp() {
   const app = express();

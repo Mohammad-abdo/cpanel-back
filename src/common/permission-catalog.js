@@ -26,6 +26,7 @@ export const PERMISSIONS = Object.freeze({
   PLATFORM_APPROVAL_DECIDE: 'platform.approval.decide',
   OPERATION_APPROVE: 'operation.approve',
   MAIL_MANAGE: 'mail.manage',
+  NOTIFICATIONS_MANAGE: 'notifications.manage',
 });
 
 export const PERMISSION_LIST = Object.freeze(Object.values(PERMISSIONS));
@@ -53,6 +54,7 @@ export const PERMISSION_RISK = Object.freeze({
   'platform.approval.decide': 'high',
   'operation.approve': 'high',
   'mail.manage': 'high',
+  'notifications.manage': 'high',
   'project.backup.restore': 'critical',
   'server.firewall.update': 'critical',
 });
