@@ -111,8 +111,10 @@ export function createAgentGatewayService({ prisma, auditService = null, platfor
           build: async ({ commandId, keys }) => {
             if (body.type !== 'backup.dump') return { sendArgs: args, storedArgs: args };
             const { password, ...rest } = args;
-            if (rest.kind === 'mysql') {
-              if (!password || !rest.database || !rest.user) throw new AppError(400, 'VALIDATION_ERROR', 'mysql dump needs database, user and password');
+            if (rest.kind === 'mysql' || rest.kind === 'postgres') {
+              if (!password || !rest.database || !rest.user) {
+                throw new AppError(400, 'VALIDATION_ERROR', `${rest.kind} dump needs database, user and password`);
+              }
               const passwordEnc = encryptField(keys.encKey, password, `${commandId}:passwordEnc`);
               return { sendArgs: { ...rest, passwordEnc }, storedArgs: { ...rest, passwordEnc: '[ENCRYPTED]' } };
             }

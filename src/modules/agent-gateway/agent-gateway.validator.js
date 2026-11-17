@@ -12,6 +12,14 @@ export const COMMAND_ARGS = {
   stats: strict({}),
   'file.list': strict({ path: absPath }),
   'file.read': strict({ path: absPath, maxBytes: z.number().int().min(1).max(262144).optional() }),
+  'file.search': strict({ path: absPath, q: z.string().min(1).max(120), limit: z.number().int().min(1).max(200).optional() }),
+  'file.write': strict({
+    path: absPath,
+    content: z.string().max(1024 * 1024),
+    expectedMtimeMs: z.number().int().min(0).optional(),
+  }),
+  'ports.list': strict({}),
+  'agent.info': strict({}),
   'deploy.step': strict({
     step: z.enum(['git_fetch', 'git_checkout', 'npm_ci', 'npm_script', 'prisma_migrate_deploy']),
     dir: absPath,
@@ -19,6 +27,7 @@ export const COMMAND_ARGS = {
     script: z.enum(['build', 'test', 'lint']).optional(),
   }),
   'pm2.control': strict({ action: z.enum(['list', 'restart', 'reload', 'stop', 'start', 'delete']), name: name.optional() }),
+  'pm2.logs': strict({ name, lines: z.number().int().min(1).max(500).optional() }),
   ufw: strict({
     action: z.enum(['status', 'allow', 'deny', 'delete_allow']),
     port: z.number().int().min(1).max(65535).optional(),
@@ -27,7 +36,7 @@ export const COMMAND_ARGS = {
   }),
   'cron.run': strict({ job: name }),
   'backup.dump': strict({
-    kind: z.enum(['mysql', 'files']),
+    kind: z.enum(['mysql', 'postgres', 'files']),
     database: name.optional(),
     user: name.optional(),
     password: z.string().min(1).max(256).optional(),
@@ -36,6 +45,18 @@ export const COMMAND_ARGS = {
   }),
   'service.restart': strict({ unit: z.string().regex(/^[a-z0-9][a-z0-9@_.-]{0,62}$/) }),
 };
+
+/** Commands that need an explicit reason prompt in the UI (high/critical risk or mutating). */
+export const COMMAND_NEEDS_REASON = new Set([
+  'file.write',
+  'deploy.step',
+  'pm2.control',
+  'pm2.logs',
+  'ufw',
+  'cron.run',
+  'backup.dump',
+  'service.restart',
+]);
 export const COMMAND_TYPES = Object.keys(COMMAND_ARGS);
 
 export const serverIdParamsSchema = z.object({ id: z.string().uuid() }).strict();
