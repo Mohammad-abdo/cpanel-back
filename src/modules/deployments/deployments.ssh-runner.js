@@ -56,7 +56,7 @@ export function createPrismaLogSink({ prisma, now = () => new Date() }) {
           serverId,
           environmentId: deployment.environmentId,
           source: 'deploy',
-          kind: phase,
+          kind: 'deployment',
           severity,
           message,
           deploymentId: deployment.id,
