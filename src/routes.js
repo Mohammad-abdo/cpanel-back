@@ -48,7 +48,8 @@ import { uptimeRouter } from './modules/uptime/uptime.routes.js';
 import { serverBackupsRouter } from './modules/server-backups/server-backups.routes.js';
 
 import { projectProvisioningRouter } from './modules/project-provisioning/project-provisioning.routes.js';
-import { projectReportsRouter, projectReportsFleetRouter } from './modules/project-reports/project-reports.routes.js';
+import { projectReportsRouter } from './modules/project-reports/project-reports.routes.js';
+import { projectReportsFleetRouter } from './modules/project-reports/project-reports.fleet.routes.js';
 
 export const apiRouter = Router();
 

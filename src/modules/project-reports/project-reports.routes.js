@@ -4,7 +4,7 @@ import { requireSession } from '../../common/middleware/require-session.js';
 import { prisma } from '../../config/prisma.js';
 import { createProjectReportsController } from './project-reports.controller.js';
 import { createProjectReportsService } from './project-reports.service.js';
-import { projectReportExportQuerySchema, projectReportParamsSchema, projectReportQuerySchema, projectsOverviewQuerySchema } from './project-reports.validator.js';
+import { projectReportExportQuerySchema, projectReportParamsSchema, projectReportQuerySchema } from './project-reports.validator.js';
 
 export const projectReportsService = createProjectReportsService({ prisma });
 const c = createProjectReportsController(projectReportsService);
@@ -15,7 +15,3 @@ const params = validate(projectReportParamsSchema, 'params');
 export const projectReportsRouter = Router();
 projectReportsRouter.get('/:id/report', requireSession(), params, validate(projectReportQuerySchema, 'query'), wrap(c.report));
 projectReportsRouter.get('/:id/report/export', requireSession({ requireMfa: true }), params, validate(projectReportExportQuerySchema, 'query'), wrap(c.export));
-
-/** Mounted at /reports before the generic reports router. */
-export const projectReportsFleetRouter = Router();
-projectReportsFleetRouter.get('/projects-overview', requireSession(), validate(projectsOverviewQuerySchema, 'query'), wrap(c.overview));

@@ -132,7 +132,16 @@ export function createProjectReportsService({ prisma, now = () => new Date() }) 
         safe('operation jobs', () => (correlationIds.length ? prisma.operationJob.findMany({ where: { correlationId: { in: correlationIds } }, take: CAP }) : [])),
         safe('certificates', () => (domainIds.length ? prisma.sslCertificate.findMany({ where: { domainId: { in: domainIds } } }) : [])),
         safe('backup runs', () => (policyIds.length ? prisma.backupRun.findMany({ where: { policyId: { in: policyIds }, createdAt: span }, orderBy: { createdAt: 'desc' }, take: 5000 }) : [])),
-        safe('restore runs', () => prisma.restoreRun.findMany({ where: { createdAt: span }, take: 2000 })),
+        // Restores belong to a project only through policy -> backup run -> artifact; never query them unscoped.
+        safe('restore runs', async () => {
+          if (!policyIds.length) return [];
+          const runs = await prisma.backupRun.findMany({ where: { policyId: { in: policyIds } }, take: 5000 });
+          const runIds = runs.map((r) => r.id);
+          if (!runIds.length) return [];
+          const arts = await prisma.backupArtifact.findMany({ where: { backupRunId: { in: runIds } }, take: 5000 });
+          const artIds = arts.map((a) => a.id);
+          return artIds.length ? prisma.restoreRun.findMany({ where: { artifactId: { in: artIds }, createdAt: span }, take: 2000 }) : [];
+        }),
         safe('uptime checks', () => (monitorIds.length ? prisma.uptimeCheck.findMany({ where: { monitorId: { in: monitorIds }, checkedAt: { gte: range.from, lt: range.to } }, orderBy: { checkedAt: 'asc' }, take: CAP }) : [])),
         safe('cron runs', () => (cronIds.length ? prisma.cronRun.findMany({ where: { jobId: { in: cronIds }, startedAt: span }, orderBy: { startedAt: 'desc' }, take: 5000 }) : [])),
         safe('logs', () => prisma.logEntry.findMany({ where: { projectId: pid, occurredAt: { gte: range.from, lt: range.to }, severity: { in: ['error', 'warn', 'warning', 'fatal', 'critical'] }, ...envFilter }, take: CAP })),

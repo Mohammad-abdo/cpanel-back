@@ -182,3 +182,65 @@ describe('metrics helpers', () => {
     expect(projectReportQuerySchema.safeParse({ evil: 1 }).success).toBe(false);
   });
 });
+
+describe('cross-project isolation', () => {
+  const P2 = U(210);
+  const T = (s) => new Date(s);
+  function twoProjects() {
+    const mk = (p, n) => ({
+      deployment: { id: U(n + 1), projectId: p, environmentId: U(n), status: 'Failed', correlationId: `x${n}`, createdAt: T('2026-06-25T10:00:00Z'), updatedAt: T('2026-06-25T10:01:00Z') },
+      policy: { id: U(n + 2), projectId: p, archivedAt: null },
+      run: { id: U(n + 3), policyId: U(n + 2), status: 'success', createdAt: T('2026-06-26T02:00:00Z') },
+      art: { id: U(n + 4), backupRunId: U(n + 3), kind: 'db', locationRef: 'x' },
+      restore: { id: U(n + 5), artifactId: U(n + 4), status: 'RESTORE-' + p.slice(-3), createdAt: T('2026-06-27T02:00:00Z') },
+      incident: { id: U(n + 6), projectId: p, status: 'closed', severity: 'warning', title: 'INC-' + p.slice(-3), detectedAt: T('2026-06-24T10:00:00Z'), closedAt: T('2026-06-24T11:00:00Z') },
+      log: { id: U(n + 7), projectId: p, severity: 'error', occurredAt: T('2026-06-26T10:00:00Z'), message: 'm' },
+      alert: { id: U(n + 8), projectId: p, severity: 'critical', status: 'firing', fingerprint: 'f' + n, createdAt: T('2026-06-26T10:00:00Z') },
+      job: { id: U(n + 9), projectId: p, serverId: U(40), name: 'JOB-' + p.slice(-3), archivedAt: null, enabled: true },
+      cronRun: { id: U(n + 10), jobId: U(n + 9), status: 'failed', startedAt: T('2026-06-26T10:00:00Z') },
+      preview: { id: U(n + 11), projectId: p, prNumber: n, status: 'active', createdAt: T('2026-06-26T10:00:00Z') },
+      audit: { id: U(n + 12), actorId: null, action: 'project.configure', resourceType: 'project', resourceId: p, result: 'success', occurredAt: T('2026-06-26T10:00:00Z'), afterJson: { name: 'NAME-' + p.slice(-3) } },
+    });
+    const a = mk(P1, 300);
+    const b = mk(P2, 400);
+    const both = (k) => [a[k], b[k]];
+    return fakePrisma({
+      project: [
+        { id: P1, serverId: U(40), name: 'A', slug: 'a', archivedAt: null },
+        { id: P2, serverId: U(41), name: 'B', slug: 'b', archivedAt: null },
+      ],
+      deployment: both('deployment'),
+      backupPolicy: both('policy'),
+      backupRun: both('run'),
+      backupArtifact: both('art'),
+      restoreRun: both('restore'),
+      securityIncident: both('incident'),
+      logEntry: both('log'),
+      alert: both('alert'),
+      cronJob: both('job'),
+      cronRun: both('cronRun'),
+      previewEnvironment: both('preview'),
+      auditEvent: both('audit'),
+      serverSnapshot: [{ id: U(500), serverId: U(41), capturedAt: T('2026-06-26T10:00:00Z'), summaryJson: { cpuPercent: 99, memPercent: 99, diskPercent: 99 } }],
+    });
+  }
+
+  it("project A's report contains nothing from project B", async () => {
+    const r = await createProjectReportsService({ prisma: twoProjects(), now: () => NOW }).getReport(P1, { timelineLimit: 200 }, OWNER);
+    const text = JSON.stringify(r);
+    expect(text).not.toContain('RESTORE-' + P2.slice(-3));
+    expect(text).not.toContain('INC-' + P2.slice(-3));
+    expect(text).not.toContain('JOB-' + P2.slice(-3));
+    expect(text).not.toContain('NAME-' + P2.slice(-3));
+    expect(r.summary.deployments.value).toBe(1);
+    expect(r.summary.incidents.value).toBe(1);
+    expect(r.summary.errorLogs.value).toBe(1);
+    expect(r.summary.alerts.value).toBe(1);
+    expect(r.sections.backups.runs).toBe(1);
+    expect(r.sections.backups.restores).toBe(1);
+    expect(r.sections.automation.cronRuns).toBe(1);
+    expect(r.sections.automation.previewsTotal).toBe(1);
+    expect(r.availability.resources).toBe(false);
+    expect(r.timeline.filter((e) => e.type === 'backup' && /Restore/.test(e.title))).toHaveLength(1);
+  });
+});
