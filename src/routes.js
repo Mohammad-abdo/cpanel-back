@@ -47,6 +47,9 @@ import { serverWebsitesRouter } from './modules/server-websites/server-websites.
 import { uptimeRouter } from './modules/uptime/uptime.routes.js';
 import { serverBackupsRouter } from './modules/server-backups/server-backups.routes.js';
 
+import { projectProvisioningRouter } from './modules/project-provisioning/project-provisioning.routes.js';
+import { projectReportsRouter, projectReportsFleetRouter } from './modules/project-reports/project-reports.routes.js';
+
 export const apiRouter = Router();
 
 apiRouter.use('/health', healthRouter);
@@ -65,6 +68,8 @@ apiRouter.use('/servers', mailServerRouter);
 apiRouter.use('/servers', agentGatewayRouter);
 apiRouter.use('/servers', serverCleanupRouter);
 apiRouter.use('/servers', serverBackupsRouter);
+apiRouter.use('/projects', projectReportsRouter);
+apiRouter.use('/reports', projectReportsFleetRouter);
 apiRouter.use('/projects', cronRouter);
 apiRouter.use('/projects', projectEnvRouter);
 apiRouter.use('/projects', projectsRouter);
@@ -79,6 +84,7 @@ apiRouter.use('/notifications', notificationsRouter);
 apiRouter.use('/deployments', deploymentsRouter);
 apiRouter.use('/backups', backupsRouter);
 apiRouter.use('/root-domains', rootDomainsRouter);
+apiRouter.use('/project-provisioning', projectProvisioningRouter);
 apiRouter.use('/github', githubRouter);
 apiRouter.use('/uptime', uptimeRouter);
 apiRouter.use('/domains', domainsRouter);

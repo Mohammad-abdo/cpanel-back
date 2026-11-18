@@ -49,6 +49,11 @@ export const ACTION_RISK = Object.freeze({
   'preview.expose': RISK.HIGH,
   'caddy.apply': RISK.HIGH,
   'ssl.wildcard.issue': RISK.HIGH,
+  // TASK-053: "Add project to server" (Apache + certbot + PM2). dns.change is reused for DNS records.
+  'project.provision': RISK.HIGH,
+  'project.decommission': RISK.HIGH,
+  'apache.vhost.apply': RISK.HIGH,
+  'certbot.issue': RISK.HIGH,
 });
 
 export const requiresApproval = (action) => {

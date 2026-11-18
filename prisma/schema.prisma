@@ -1584,3 +1584,25 @@ model GitHubAppConfig {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
+
+/// TASK-053: one "Add project to server" run (steps, log tails, rollback note). Never holds secrets, env values or tokens.
+model ProvisioningRun {
+  id           String   @id @default(uuid())
+  serverId     String
+  projectId    String?
+  mode         String   @default("provision") @db.VarChar(20)
+  status       String   @default("queued") @db.VarChar(24)
+  executor     String   @default("simulated") @db.VarChar(12)
+  slug         String   @db.VarChar(64)
+  primaryDomain String  @db.VarChar(253)
+  planJson     Json
+  stepsJson    Json
+  contextJson  Json?
+  rollbackNote String?  @db.VarChar(1000)
+  createdById  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([serverId, createdAt])
+  @@index([projectId])
+}
