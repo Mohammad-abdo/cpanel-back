@@ -60,6 +60,9 @@ export function createWebmailAuthService({ prisma, ssh = null, now = () => new D
     cookieName: COOKIE,
 
     async login({ address, password }, meta = {}) {
+      // Trim accidental paste spaces; do not alter internal spaces (passwords may contain them).
+      address = String(address ?? '').trim().toLowerCase();
+      password = String(password ?? '').replace(/^\s+|\s+$/g, '');
       const at = address.lastIndexOf('@');
       const localPart = address.slice(0, at);
       const domainName = address.slice(at + 1);

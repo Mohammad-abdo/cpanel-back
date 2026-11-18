@@ -177,6 +177,7 @@ export function createMailboxesService({ prisma, now = () => new Date(), auditSe
     /** Never echoes the password or any hash; the audit/event records only that it changed. */
     async setPassword(id, { password }, actor) {
       const { mb, domain } = await mutableMailbox(id, actor);
+      password = String(password ?? '').replace(/^\s+|\s+$/g, '');
       const weak = checkMailboxPassword(password, mb.localPart);
       if (weak) throw new AppError(400, 'WEAK_PASSWORD', weak);
       const row = await guardSchema(() =>
