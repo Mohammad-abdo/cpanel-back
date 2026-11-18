@@ -14,6 +14,8 @@ import { createProjectAccess } from '../projects/projects.access.js';
 import { generateHookToken, generateWebhookSecret, hashHookToken, verifyGithubSignature } from './webhooks.crypto.js';
 
 export const GITHUB_EVENTS = Object.freeze(['push', 'pull_request', 'ping']);
+/** TASK-055: App-level events, accepted only with the App webhook secret. */
+export const INSTALLATION_EVENTS = Object.freeze(['installation', 'installation_repositories']);
 const PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
 const ZERO_SHA = /^0+$/;
 
@@ -38,6 +40,8 @@ export function createWebhooksService({
   /** TASK-045: when set and enabled for the project, pull_request deliveries create/update/destroy preview environments. */
   previews = null,
   platform = null,
+  /** TASK-055: platform GitHub App service ({ verifyAppSignature, handleInstallationEvent, recordEvent }). Optional. */
+  githubApp = null,
   now = () => new Date(),
   credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
 }) {
@@ -122,26 +126,50 @@ export function createWebhooksService({
       } catch {
         throw invalid();
       }
+      if (INSTALLATION_EVENTS.includes(event)) {
+        if (!githubApp || !(await githubApp.verifyAppSignature(rawBody, signature))) throw invalid();
+        const deliveries = delegate('webhookDelivery');
+        if (await deliveries.findUnique({ where: { deliveryId } })) return { accepted: false, replayed: true };
+        try {
+          await deliveries.create({ data: { deliveryId, projectId: null, event, outcome: 'accepted' } });
+        } catch {
+          return { accepted: false, replayed: true };
+        }
+        const out = await githubApp.handleInstallationEvent(event, payload);
+        await githubApp.recordEvent?.({ event, outcome: 'accepted' });
+        return out;
+      }
       const candidates = new Set(
         [payload?.repository?.clone_url, payload?.repository?.ssh_url, payload?.repository?.html_url, payload?.repository?.git_url]
           .filter(Boolean)
           .map(normalizeRepoUrl),
       );
-      if (candidates.size === 0) throw invalid();
+      if (candidates.size === 0) {
+        // App-level ping carries no repository; it is valid only with the App secret.
+        if (event === 'ping' && githubApp && (await githubApp.verifyAppSignature(rawBody, signature))) {
+          await githubApp.recordEvent?.({ event, outcome: 'pong' });
+          return { accepted: false, pong: true };
+        }
+        throw invalid();
+      }
 
       const repos = await prisma.projectRepository.findMany({ where: { remoteUrl: { not: null } }, take: 1000 });
       const hooks = delegate('projectWebhook');
       let matched = null;
       for (const repo of repos.filter((r) => candidates.has(normalizeRepoUrl(r.remoteUrl)))) {
         const cfg = await hooks.findUnique({ where: { projectId: repo.projectId } });
-        if (!cfg?.enabled || !cfg.secretEnc) continue;
-        const secret = decrypt(Buffer.from(cfg.secretEnc), credentialKey()).toString('utf8');
-        if (verifyGithubSignature(rawBody, signature, secret)) {
+        if (!cfg?.enabled) continue;
+        // Per-project secret (TASK-044) OR the App-level secret (TASK-055); both constant-time.
+        const secret = cfg.secretEnc ? decrypt(Buffer.from(cfg.secretEnc), credentialKey()).toString('utf8') : null;
+        if ((secret && verifyGithubSignature(rawBody, signature, secret)) || (githubApp && (await githubApp.verifyAppSignature(rawBody, signature)))) {
           matched = { repo, cfg };
           break;
         }
       }
-      if (!matched) throw invalid();
+      if (!matched) {
+        await githubApp?.recordEvent?.({ event, outcome: 'rejected' });
+        throw invalid();
+      }
       const projectId = matched.repo.projectId;
 
       if (!GITHUB_EVENTS.includes(event)) return { accepted: false, ignored: 'event not allowed' };
@@ -151,6 +179,7 @@ export function createWebhooksService({
       const record = async (outcome) => {
         try {
           await deliveries.create({ data: { deliveryId, projectId, event, outcome } });
+          await githubApp?.recordEvent?.({ event, outcome });
         } catch {
           return false; // lost a race on the unique delivery id
         }

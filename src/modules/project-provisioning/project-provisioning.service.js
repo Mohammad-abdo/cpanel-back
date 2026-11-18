@@ -85,6 +85,8 @@ export function createProjectProvisioningService({
   rbac = null,
   serverAccessService = null,
   rootDomains = null,
+  /** TASK-055: platform GitHub App; supplies a short-lived installation token for private github.com clones. */
+  githubApp = null,
   repository = null,
   env = process.env,
   now = () => new Date(),
@@ -297,7 +299,15 @@ export function createProjectProvisioningService({
     async app_dir({ r, remote, secrets }) {
       return exec(remote, APPDIR_SCRIPT, { args: [r.appDir] }, secrets);
     },
-    async clone({ plan, r, remote, secrets, rawSecrets }) {
+    async clone({ run, plan, r, remote, secrets, rawSecrets: given }) {
+      const rawSecrets = { ...given };
+      if (!rawSecrets.gitToken && !rawSecrets.deployKey && githubApp && run?.projectId && /^https:\/\/github\.com\//i.test(plan.repoUrl)) {
+        const cred = await githubApp.cloneCredential(plan.repoUrl, { projectId: run.projectId }).catch(() => null);
+        if (cred?.token) {
+          rawSecrets.gitToken = cred.token;
+          secrets.push(cred.token);
+        }
+      }
       const auth = rawSecrets.gitToken ? 'token' : rawSecrets.deployKey ? 'key' : 'none';
       const stdin = rawSecrets.gitToken ?? rawSecrets.deployKey ?? '';
       if (auth === 'token' && !/^https:\/\//.test(plan.repoUrl)) throw new StepFailure('A token needs an https:// repository URL', { code: 'AUTH_URL_MISMATCH' });

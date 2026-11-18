@@ -8,6 +8,7 @@ import { getDeps } from '../platform/platform.wiring.js';
 import { createDeploymentsService } from '../deployments/deployments.service.js';
 import { operationsService } from '../operations/operations.routes.js';
 import { previewsService } from '../previews/previews.routes.js';
+import { githubService } from '../github/github.routes.js';
 import { createWebhooksController } from './webhooks.controller.js';
 import { createWebhooksService } from './webhooks.service.js';
 import { hookParamsSchema, hookTokenParamsSchema, createHookBodySchema, projectIdParamsSchema, triggerHookBodySchema, updateSettingsBodySchema } from './webhooks.validator.js';
@@ -15,7 +16,7 @@ import { hashHookToken } from './webhooks.crypto.js';
 
 const auditService = createAuditService({ prisma });
 const deploymentsService = createDeploymentsService({ prisma, auditService, operationsService });
-const svc = createWebhooksService({ prisma, auditService, deploymentsService, previews: previewsService, platform: getDeps().platform });
+const svc = createWebhooksService({ prisma, auditService, deploymentsService, previews: previewsService, platform: getDeps().platform, githubApp: githubService });
 const c = createWebhooksController(svc);
 const mfa = requireSession({ requireMfa: true });
 const wrap = (fn) => (req, res, next) => fn(req, res).catch(next);

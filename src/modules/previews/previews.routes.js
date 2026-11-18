@@ -11,6 +11,7 @@ import { operationsService } from '../operations/operations.routes.js';
 import { rootDomainsService } from '../root-domains/root-domains.routes.js';
 import { createPreviewsController } from './previews.controller.js';
 import { createPreviewsService } from './previews.service.js';
+import { githubService } from '../github/github.routes.js';
 import { createBodySchema, exposeBodySchema, extendBodySchema, previewParamsSchema, projectParamsSchema, updateSettingsBodySchema } from './previews.validator.js';
 
 const deps = getDeps();
@@ -19,7 +20,7 @@ const deploymentsService = createDeploymentsService({ prisma, auditService, oper
 const runner = resolveDeploymentAdapters({ prisma }).runner;
 
 /** Shared with the GitHub webhook (TASK-044) so pull_request deliveries drive the same lifecycle. */
-export const previewsService = createPreviewsService({ ...deps, prisma, auditService, deploymentsService, rootDomains: rootDomainsService, teardown: (args) => runner.teardown(args) });
+export const previewsService = createPreviewsService({ ...deps, prisma, auditService, deploymentsService, rootDomains: rootDomainsService, githubApp: githubService, teardown: (args) => runner.teardown(args) });
 const c = createPreviewsController(previewsService);
 const write = requireSession({ requireMfa: true });
 const project = validate(projectParamsSchema, 'params');

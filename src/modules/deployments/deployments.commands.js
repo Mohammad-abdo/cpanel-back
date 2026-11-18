@@ -177,11 +177,20 @@ BASE="$1"; shift
 case "$BASE" in /*) ;; *) echo "bad base" >&2; exit 64 ;; esac
 `;
 
-/** args: BASE REL_ID REPO_URL SHA BRANCH. Clones, pins the commit, prints NT_SHA=<full sha>. */
+/** args: BASE REL_ID REPO_URL SHA BRANCH [AUTH=none|token]. With AUTH=token the GitHub installation token arrives on stdin only (0600 file, removed on exit). Clones, pins the commit, prints NT_SHA=<full sha>. */
 export const FETCH_SCRIPT = `${PREAMBLE}
-REL_ID="$1"; URL="$2"; SHA="$3"; BRANCH="$4"
+REL_ID="$1"; URL="$2"; SHA="$3"; BRANCH="$4"; AUTH="\${5:-none}"
 mkdir -p "$BASE/releases"
 REL="$BASE/releases/$REL_ID"
+if [ "$AUTH" = "token" ]; then
+  umask 077
+  NT_TMP="$(mktemp -d)"
+  trap 'rm -rf "$NT_TMP"' EXIT
+  head -c 4096 > "$NT_TMP/secret"
+  printf '#!/bin/sh\\ncase "$1" in Username*) echo x-access-token ;; *) cat "%s/secret" ;; esac\\n' "$NT_TMP" > "$NT_TMP/askpass"
+  chmod 700 "$NT_TMP/askpass"
+  export GIT_ASKPASS="$NT_TMP/askpass" GIT_TERMINAL_PROMPT=0
+fi
 if [ -z "$SHA" ]; then
   SHA=$(git ls-remote -- "$URL" "refs/heads/$BRANCH" | cut -f1 | head -n 1)
 fi

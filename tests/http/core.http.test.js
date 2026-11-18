@@ -26,7 +26,8 @@ function listGetRoutes() {
       if (sub.route?.methods?.get) out.push(`${mounts[i]}${sub.route.path === '/' ? '' : sub.route.path}`);
     }
   });
-  return out.filter((p) => p !== '/health');
+  // /github/app/callback is the public manifest redirect target (TASK-055); the signed single-use state authenticates it.
+  return out.filter((p) => p !== '/health' && p !== '/github/app/callback');
 }
 
 describe('platform plumbing', () => {

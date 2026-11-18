@@ -6,6 +6,7 @@ import { getDeps } from '../platform/platform.wiring.js';
 import { wrap } from '../platform/platform.http.js';
 import { serverAccessService } from '../server-access/server-access.routes.js';
 import { rootDomainsService } from '../root-domains/root-domains.routes.js';
+import { githubService } from '../github/github.routes.js';
 import { createProjectProvisioningController } from './project-provisioning.controller.js';
 import { createProjectProvisioningService } from './project-provisioning.service.js';
 import {
@@ -13,7 +14,7 @@ import {
 } from './project-provisioning.validator.js';
 
 const deps = getDeps();
-export const projectProvisioningService = createProjectProvisioningService({ ...deps, prisma, serverAccessService, rootDomains: rootDomainsService });
+export const projectProvisioningService = createProjectProvisioningService({ ...deps, prisma, serverAccessService, rootDomains: rootDomainsService, githubApp: githubService });
 const c = createProjectProvisioningController(projectProvisioningService);
 const write = requireSession({ requireMfa: true });
 

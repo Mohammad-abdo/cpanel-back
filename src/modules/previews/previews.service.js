@@ -48,6 +48,8 @@ export function createPreviewsService({
   /** ({ projectId, environmentId, serverId }) -> { ok }. Defaults to the deploy executor's runner.teardown when injected. */
   teardown = null,
   commenter = createGithubCommenter(),
+  /** TASK-055: platform GitHub App; used for PR comments when the project has no per-project token. */
+  githubApp = null,
   env = process.env,
   now = () => new Date(),
   credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
@@ -109,9 +111,16 @@ export function createPreviewsService({
 
   // ------------------------------------------------------------------ side effects (each isolated and best effort where noted)
   async function comment(row, settings, project, status = row.status) {
-    if (!settings?.commentEnabled || !settings.githubTokenEnc) return;
+    if (!settings?.commentEnabled || (!settings.githubTokenEnc && !githubApp)) return;
     try {
       const repo = await prisma.projectRepository.findUnique({ where: { projectId: project.id } });
+      if (!settings.githubTokenEnc) {
+        // App path creates the comment once; later status changes keep that comment.
+        if (row.commentId) return;
+        const appId = await githubApp.createPrComment(repo?.remoteUrl, row.prNumber, renderComment({ status, url: row.url, commitSha: row.commitSha, basicAuth: Boolean(row.basicAuthHash) }));
+        if (appId) await setRow(row.id, { commentId: appId });
+        return;
+      }
       const token = decrypt(Buffer.from(settings.githubTokenEnc), credentialKey()).toString('utf8');
       const id = await commenter.upsert({ token, remoteUrl: repo?.remoteUrl, prNumber: row.prNumber, commentId: row.commentId, body: renderComment({ status, url: row.url, commitSha: row.commitSha, basicAuth: Boolean(row.basicAuthHash) }) });
       if (id !== row.commentId) await setRow(row.id, { commentId: id });

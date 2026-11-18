@@ -89,6 +89,8 @@ export function createSshRunner({
   credentialKey = () => process.env.CREDENTIAL_ENCRYPTION_KEY,
   logSink = createPrismaLogSink({ prisma }),
   timeouts = {},
+  /** TASK-055: async (remoteUrl, { projectId }) => { token } | null. The token goes to the fetch script through stdin only. */
+  cloneCredential = null,
 }) {
   const t = { fetch: 180_000, env: 30_000, install: 900_000, build: 900_000, switch: 30_000, pm2: 90_000, prune: 60_000, ...timeouts };
   /** deploymentId -> { sha, detected } carried from prepare to build/deploy within the process. */
@@ -164,6 +166,7 @@ export function createSshRunner({
       const url = validateRepoUrl(ctx.repo?.remoteUrl);
       const sha = deployment.commitSha ? validateSha(deployment.commitSha) : '';
       const branch = validateRef(job?.payloadJson?.branch ?? ctx.repo?.defaultBranch ?? 'main');
+      const cred = cloneCredential && /^https:\/\/github\.com\//i.test(url) ? await cloneCredential(url, { projectId: deployment.projectId }).catch(() => null) : null;
       return withClient(ctx.serverId, async (client) => {
         const step = await runStep({
           client,
@@ -172,7 +175,9 @@ export function createSshRunner({
           phase: 'Preparing',
           name: 'git fetch + checkout pinned commit',
           script: FETCH_SCRIPT,
-          args: [ctx.config.basePath, deployment.id, url, sha, branch],
+          args: cred?.token ? [ctx.config.basePath, deployment.id, url, sha, branch, 'token'] : [ctx.config.basePath, deployment.id, url, sha, branch],
+          stdin: cred?.token ?? '',
+          secrets: cred?.token ? [cred.token] : [],
           timeoutMs: t.fetch,
         });
         if (!step.ok) return failure([step]);
@@ -331,12 +336,12 @@ export function createSshHealthChecker({ prisma, connector, credentialKey = () =
  * Chooses the runner/health checker from DEPLOY_EXECUTOR (simulated | ssh). Unknown values fall back to
  * simulated. `ssh` needs a connector (createSshConnector() in the API process).
  */
-export function resolveDeploymentAdapters({ prisma, connector = null, env = process.env, logSink } = {}) {
+export function resolveDeploymentAdapters({ prisma, connector = null, env = process.env, logSink, cloneCredential = null } = {}) {
   const mode = String(env.DEPLOY_EXECUTOR ?? 'simulated').toLowerCase();
   if (mode !== 'ssh') return { runner: createSimulatedRunner(), healthChecker: createSimulatedHealthChecker(), mode: 'simulated' };
   const conn = connector ?? createSshConnector({ timeoutMs: 30_000 });
   return {
-    runner: createSshRunner({ prisma, connector: conn, ...(logSink ? { logSink } : {}) }),
+    runner: createSshRunner({ prisma, connector: conn, ...(logSink ? { logSink } : {}), ...(cloneCredential ? { cloneCredential } : {}) }),
     healthChecker: createSshHealthChecker({ prisma, connector: conn }),
     mode: 'ssh',
   };

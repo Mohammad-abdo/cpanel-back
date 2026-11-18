@@ -42,6 +42,9 @@ export const ACTION_RISK = Object.freeze({
   'agent.recover': RISK.HIGH,
   // Phase 11 (TASK-043/044): custom (non-allowlisted) build commands and webhook secret rotation.
   'deploy.command.approve': RISK.HIGH,
+  // TASK-055: GitHub App disconnect and webhook secret rotation.
+  'github.app.disconnect': RISK.HIGH,
+  'github.app.rotate_secret': RISK.HIGH,
   // Phase 11 (TASK-048): custom cron commands and server cleanup apply.
   'cron.custom.command': RISK.HIGH,
   'server.cleanup.apply': RISK.HIGH,
